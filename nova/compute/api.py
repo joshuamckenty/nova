@@ -143,6 +143,10 @@ class API(base.Base):
         if not instance_type:
             instance_type = instance_types.get_default_instance_type()
 
+        # TODO: FIXME REMOVE THIS(anthony)
+        del instance_type['created_at']
+        del instance_type['updated_at']
+
         num_instances = quota.allowed_instances(context, max_count,
                                                 instance_type)
         if num_instances < min_count:
