@@ -20,6 +20,7 @@
 from __future__ import absolute_import
 
 import datetime
+import random
 
 from glance.common import exception as glance_exception
 
@@ -39,11 +40,26 @@ FLAGS = flags.FLAGS
 GlanceClient = utils.import_class('glance.client.Client')
 
 
+def pick_glance_api_server():
+    """Return which Glance API server to use for the request
+
+    This method provides a very primitive form of load-balancing suitable for
+    testing and sandbox environments. In production, it would be better to use
+    one IP and route that to a real load-balancer.
+
+        Returns (host, port)
+    """
+    host_port = random.choice(FLAGS.glance_api_servers)
+    host, port_str = host_port.split(':')
+    port = int(port_str)
+    return host, port
+
+
 class GlanceImageService(service.BaseImageService):
     """Provides storage and retrieval of disk image objects within Glance."""
 
     GLANCE_ONLY_ATTRS = ['size', 'location', 'disk_format',
-                         'container_format']
+                         'container_format', 'checksum']
 
     # NOTE(sirp): Overriding to use _translate_to_service provided by
     # BaseImageService
@@ -51,30 +67,57 @@ class GlanceImageService(service.BaseImageService):
                           GLANCE_ONLY_ATTRS
 
     def __init__(self, client=None):
-        # FIXME(sirp): can we avoid dependency-injection here by using
-        # stubbing out a fake?
-        if client is None:
-            self.client = GlanceClient(FLAGS.glance_host, FLAGS.glance_port)
-        else:
-            self.client = client
+        self._client = client
 
-    def index(self, context):
+    def _get_client(self):
+        # NOTE(sirp): we want to load balance each request across glance
+        # servers. Since GlanceImageService is a long-lived object, `client`
+        # is made to choose a new server each time via this property.
+        if self._client is not None:
+            return self._client
+        glance_host, glance_port = pick_glance_api_server()
+        return GlanceClient(glance_host, glance_port)
+
+    def _set_client(self, client):
+        self._client = client
+
+    client = property(_get_client, _set_client)
+
+    def _set_client_context(self, context):
+        """Sets the client's auth token."""
+        self.client.set_auth_token(context.auth_token)
+
+    def index(self, context, filters=None, marker=None, limit=None):
         """Calls out to Glance for a list of images available."""
         # NOTE(sirp): We need to use `get_images_detailed` and not
         # `get_images` here because we need `is_public` and `properties`
         # included so we can filter by user
+        self._set_client_context(context)
         filtered = []
-        image_metas = self.client.get_images_detailed()
+        filters = filters or {}
+        if 'is_public' not in filters:
+            # NOTE(vish): don't filter out private images
+            filters['is_public'] = 'none'
+        image_metas = self.client.get_images_detailed(filters=filters,
+                                                      marker=marker,
+                                                      limit=limit)
         for image_meta in image_metas:
             if self._is_image_available(context, image_meta):
                 meta_subset = utils.subset_dict(image_meta, ('id', 'name'))
                 filtered.append(meta_subset)
         return filtered
 
-    def detail(self, context):
+    def detail(self, context, filters=None, marker=None, limit=None):
         """Calls out to Glance for a list of detailed image information."""
+        self._set_client_context(context)
         filtered = []
-        image_metas = self.client.get_images_detailed()
+        filters = filters or {}
+        if 'is_public' not in filters:
+            # NOTE(vish): don't filter out private images
+            filters['is_public'] = 'none'
+        image_metas = self.client.get_images_detailed(filters=filters,
+                                                      marker=marker,
+                                                      limit=limit)
         for image_meta in image_metas:
             if self._is_image_available(context, image_meta):
                 base_image_meta = self._translate_to_base(image_meta)
@@ -83,6 +126,7 @@ class GlanceImageService(service.BaseImageService):
 
     def show(self, context, image_id):
         """Returns a dict with image data for the given opaque image id."""
+        self._set_client_context(context)
         try:
             image_meta = self.client.get_image_meta(image_id)
         except glance_exception.NotFound:
@@ -106,6 +150,7 @@ class GlanceImageService(service.BaseImageService):
 
     def get(self, context, image_id, data):
         """Calls out to Glance for metadata and data and writes data."""
+        self._set_client_context(context)
         try:
             image_meta, image_chunks = self.client.get_image(image_id)
         except glance_exception.NotFound:
@@ -123,6 +168,7 @@ class GlanceImageService(service.BaseImageService):
         :raises: AlreadyExists if the image already exist.
 
         """
+        self._set_client_context(context)
         # Translate Base -> Service
         LOG.debug(_('Creating image in Glance. Metadata passed in %s'),
                   image_meta)
@@ -145,6 +191,7 @@ class GlanceImageService(service.BaseImageService):
         :raises: ImageNotFound if the image does not exist.
 
         """
+        self._set_client_context(context)
         # NOTE(vish): show is to check if image is available
         self.show(context, image_id)
         try:
@@ -161,6 +208,7 @@ class GlanceImageService(service.BaseImageService):
         :raises: ImageNotFound if the image does not exist.
 
         """
+        self._set_client_context(context)
         # NOTE(vish): show is to check if image is available
         self.show(context, image_id)
         try:

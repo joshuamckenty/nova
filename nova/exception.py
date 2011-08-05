@@ -24,8 +24,9 @@ SHOULD include dedicated exception logging.
 
 """
 
-from nova import log as logging
+from functools import wraps
 
+from nova import log as logging
 
 LOG = logging.getLogger('nova.exception')
 
@@ -65,7 +66,7 @@ class BuildInProgress(Error):
 
 class DBError(Error):
     """Wraps an implementation specific exception."""
-    def __init__(self, inner_exception):
+    def __init__(self, inner_exception=None):
         self.inner_exception = inner_exception
         super(DBError, self).__init__(str(inner_exception))
 
@@ -77,23 +78,54 @@ def wrap_db_error(f):
         except Exception, e:
             LOG.exception(_('DB exception wrapped.'))
             raise DBError(e)
-    return _wrap
-    _wrap.func_name = f.func_name
-
-
-def wrap_exception(f):
-    def _wrap(*args, **kw):
-        try:
-            return f(*args, **kw)
-        except Exception, e:
-            if not isinstance(e, Error):
-                #exc_type, exc_value, exc_traceback = sys.exc_info()
-                LOG.exception(_('Uncaught exception'))
-                #logging.error(traceback.extract_stack(exc_traceback))
-                raise Error(str(e))
-            raise
     _wrap.func_name = f.func_name
     return _wrap
+
+
+def wrap_exception(notifier=None, publisher_id=None, event_type=None,
+                   level=None):
+    """This decorator wraps a method to catch any exceptions that may
+    get thrown. It logs the exception as well as optionally sending
+    it to the notification system.
+    """
+    # TODO(sandy): Find a way to import nova.notifier.api so we don't have
+    # to pass it in as a parameter. Otherwise we get a cyclic import of
+    # nova.notifier.api -> nova.utils -> nova.exception :(
+    def inner(f):
+        def wrapped(*args, **kw):
+            try:
+                return f(*args, **kw)
+            except Exception, e:
+                if notifier:
+                    payload = dict(args=args, exception=e)
+                    payload.update(kw)
+
+                    # Use a temp vars so we don't shadow
+                    # our outer definitions.
+                    temp_level = level
+                    if not temp_level:
+                        temp_level = notifier.ERROR
+
+                    temp_type = event_type
+                    if not temp_type:
+                        # If f has multiple decorators, they must use
+                        # functools.wraps to ensure the name is
+                        # propagated.
+                        temp_type = f.__name__
+
+                    notifier.notify(publisher_id, temp_type, temp_level,
+                                    payload)
+
+                if (not isinstance(e, Error) and
+                    not isinstance(e, NovaException)):
+                    #exc_type, exc_value, exc_traceback = sys.exc_info()
+                    LOG.exception(_('Uncaught exception'))
+                    #logging.error(traceback.extract_stack(exc_traceback))
+                    raise Error(str(e))
+                raise
+
+        return wraps(f)(wrapped)
+    return inner
 
 
 class NovaException(Exception):
@@ -118,11 +150,20 @@ class NovaException(Exception):
         return self._error_string
 
 
+class VirtualInterfaceCreateException(NovaException):
+    message = _("Virtual Interface creation failed")
+
+
+class VirtualInterfaceMacAddressException(NovaException):
+    message = _("5 attempts to create virtual interface"
+                "with unique mac address failed")
+
+
 class NotAuthorized(NovaException):
     message = _("Not authorized.")
 
     def __init__(self, *args, **kwargs):
-        super(NotFound, self).__init__(**kwargs)
+        super(NotAuthorized, self).__init__(**kwargs)
 
 
 class AdminRequired(NotAuthorized):
@@ -271,6 +312,14 @@ class VolumeNotFoundForInstance(VolumeNotFound):
     message = _("Volume not found for instance %(instance_id)s.")
 
 
+class SnapshotNotFound(NotFound):
+    message = _("Snapshot %(snapshot_id)s could not be found.")
+
+
+class VolumeIsBusy(Error):
+    message = _("deleting volume %(volume_name)s that has snapshot")
+
+
 class ExportDeviceNotFoundForVolume(NotFound):
     message = _("No export device found for volume %(volume_id)s.")
 
@@ -281,6 +330,15 @@ class ISCSITargetNotFoundForVolume(NotFound):
 
 class DiskNotFound(NotFound):
     message = _("No disk at %(location)s")
+
+
+class InvalidImageRef(Invalid):
+    message = _("Invalid image href %(image_href)s.")
+
+
+class ListingImageRefsNotSupported(Invalid):
+    message = _("Some images have been stored via hrefs."
+        + " This version of the api does not support displaying image hrefs.")
 
 
 class ImageNotFound(NotFound):
@@ -315,6 +373,10 @@ class StorageRepositoryNotFound(NotFound):
     message = _("Cannot find SR to read/write VDI.")
 
 
+class NetworkNotCreated(NovaException):
+    message = _("%(req)s is required to create a network.")
+
+
 class NetworkNotFound(NotFound):
     message = _("Network %(network_id)s could not be found.")
 
@@ -339,24 +401,65 @@ class DatastoreNotFound(NotFound):
     message = _("Could not find the datastore reference(s) which the VM uses.")
 
 
-class NoFixedIpsFoundForInstance(NotFound):
+class FixedIpNotFound(NotFound):
+    message = _("No fixed IP associated with id %(id)s.")
+
+
+class FixedIpNotFoundForAddress(FixedIpNotFound):
+    message = _("Fixed ip not found for address %(address)s.")
+
+
+class FixedIpNotFoundForInstance(FixedIpNotFound):
     message = _("Instance %(instance_id)s has zero fixed ips.")
 
 
+class FixedIpNotFoundForNetworkHost(FixedIpNotFound):
+    message = _("Network host %(host)s has zero fixed ips "
+                "in network %(network_id)s.")
+
+
+class FixedIpNotFoundForSpecificInstance(FixedIpNotFound):
+    message = _("Instance %(instance_id)s doesn't have fixed ip '%(ip)s'.")
+
+
+class FixedIpNotFoundForVirtualInterface(FixedIpNotFound):
+    message = _("Virtual interface %(vif_id)s has zero associated fixed ips.")
+
+
+class FixedIpNotFoundForHost(FixedIpNotFound):
+    message = _("Host %(host)s has zero fixed ips.")
+
+
+class NoMoreFixedIps(Error):
+    message = _("Zero fixed ips available.")
+
+
+class NoFixedIpsDefined(NotFound):
+    message = _("Zero fixed ips could be found.")
+
+
 class FloatingIpNotFound(NotFound):
-    message = _("Floating ip not found for fixed address %(fixed_ip)s.")
+    message = _("Floating ip not found for id %(id)s.")
+
+
+class FloatingIpNotFoundForAddress(FloatingIpNotFound):
+    message = _("Floating ip not found for address %(address)s.")
+
+
+class FloatingIpNotFoundForProject(FloatingIpNotFound):
+    message = _("Floating ip not found for project %(project_id)s.")
+
+
+class FloatingIpNotFoundForHost(FloatingIpNotFound):
+    message = _("Floating ip not found for host %(host)s.")
+
+
+class NoMoreFloatingIps(FloatingIpNotFound):
+    message = _("Zero floating ips available.")
 
 
 class NoFloatingIpsDefined(NotFound):
-    message = _("Zero floating ips could be found.")
-
-
-class NoFloatingIpsDefinedForHost(NoFloatingIpsDefined):
-    message = _("Zero floating ips defined for host %(host)s.")
-
-
-class NoFloatingIpsDefinedForInstance(NoFloatingIpsDefined):
-    message = _("Zero floating ips defined for instance %(instance_id)s.")
+    message = _("Zero floating ips exist.")
 
 
 class KeypairNotFound(NotFound):
@@ -465,14 +568,27 @@ class ZoneNotFound(NotFound):
     message = _("Zone %(zone_id)s could not be found.")
 
 
-class SchedulerHostFilterDriverNotFound(NotFound):
-    message = _("Scheduler Host Filter Driver %(driver_name)s could"
+class SchedulerHostFilterNotFound(NotFound):
+    message = _("Scheduler Host Filter %(filter_name)s could not be found.")
+
+
+class SchedulerCostFunctionNotFound(NotFound):
+    message = _("Scheduler cost function %(cost_fn_str)s could"
                 " not be found.")
+
+
+class SchedulerWeightFlagNotFound(NotFound):
+    message = _("Scheduler weight flag not found: %(flag_name)s")
 
 
 class InstanceMetadataNotFound(NotFound):
     message = _("Instance %(instance_id)s has no metadata with "
                 "key %(metadata_key)s.")
+
+
+class InstanceTypeExtraSpecsNotFound(NotFound):
+    message = _("Instance Type %(instance_type_id)s has no extra specs with "
+                "key %(extra_specs_key)s.")
 
 
 class LDAPObjectNotFound(NotFound):
@@ -520,6 +636,14 @@ class GlobalRoleNotAllowed(NotAllowed):
     message = _("Unable to use global role %(role_id)s")
 
 
+class ImageRotationNotAllowed(NovaException):
+    message = _("Rotation is not allowed for snapshots")
+
+
+class RotationRequiredForBackup(NovaException):
+    message = _("Rotation param is required for backup image_type")
+
+
 #TODO(bcwaldon): EOL this exception!
 class Duplicate(NovaException):
     pass
@@ -556,3 +680,23 @@ class InstanceExists(Duplicate):
 
 class MigrationError(NovaException):
     message = _("Migration error") + ": %(reason)s"
+
+
+class MalformedRequestBody(NovaException):
+    message = _("Malformed message body: %(reason)s")
+
+
+class PasteConfigNotFound(NotFound):
+    message = _("Could not find paste config at %(path)s")
+
+
+class PasteAppNotFound(NotFound):
+    message = _("Could not load paste app '%(name)s' from %(path)s")
+
+
+class CannotResizeToSameSize(NovaException):
+    message = _("When resizing, instances must change size!")
+
+
+class CannotResizeToSmallerSize(NovaException):
+    message = _("Resizing to a smaller size is not supported.")

@@ -25,6 +25,7 @@ from nova import log as logging
 from nova import test
 from nova.auth import manager
 from nova.api.ec2 import cloud
+from nova.auth import fakeldap
 
 FLAGS = flags.FLAGS
 LOG = logging.getLogger('nova.tests.auth_unittest')
@@ -82,10 +83,11 @@ class user_and_project_generator(object):
 
 class _AuthManagerBaseTestCase(test.TestCase):
     def setUp(self):
-        FLAGS.auth_driver = self.auth_driver
         super(_AuthManagerBaseTestCase, self).setUp()
-        self.flags(connection_type='fake')
+        self.flags(auth_driver=self.auth_driver,
+                connection_type='fake')
         self.manager = manager.AuthManager(new=True)
+        self.manager.mc.cache = {}
 
     def test_create_and_find_user(self):
         with user_generator(self.manager):
@@ -100,7 +102,7 @@ class _AuthManagerBaseTestCase(test.TestCase):
             self.assertEqual('classified', u.secret)
             self.assertEqual('private-party', u.access)
 
-    def test_004_signature_is_valid(self):
+    def test_signature_is_valid(self):
         with user_generator(self.manager, name='admin', secret='admin',
                             access='admin'):
             with project_generator(self.manager, name="admin",
@@ -139,15 +141,14 @@ class _AuthManagerBaseTestCase(test.TestCase):
                         '127.0.0.1',
                         '/services/Cloud'))
 
-    def test_005_can_get_credentials(self):
-        return
-        credentials = self.manager.get_user('test1').get_credentials()
-        self.assertEqual(credentials,
-        'export EC2_ACCESS_KEY="access"\n' +
-        'export EC2_SECRET_KEY="secret"\n' +
-        'export EC2_URL="http://127.0.0.1:8773/services/Cloud"\n' +
-        'export S3_URL="http://127.0.0.1:3333/"\n' +
-        'export EC2_USER_ID="test1"\n')
+    def test_can_get_credentials(self):
+        st = {'access': 'access', 'secret': 'secret'}
+        with user_and_project_generator(self.manager, user_state=st) as (u, p):
+            credentials = self.manager.get_environment_rc(u, p)
+            LOG.debug(credentials)
+            self.assertTrue('export EC2_ACCESS_KEY="access:testproj"\n'
+                            in credentials)
+            self.assertTrue('export EC2_SECRET_KEY="secret"\n' in credentials)
 
     def test_can_list_users(self):
         with user_generator(self.manager):
@@ -367,6 +368,15 @@ class _AuthManagerBaseTestCase(test.TestCase):
 
 class AuthManagerLdapTestCase(_AuthManagerBaseTestCase):
     auth_driver = 'nova.auth.ldapdriver.FakeLdapDriver'
+
+    def test_reconnect_on_server_failure(self):
+        self.manager.get_users()
+        fakeldap.server_fail = True
+        try:
+            self.assertRaises(fakeldap.SERVER_DOWN, self.manager.get_users)
+        finally:
+            fakeldap.server_fail = False
+        self.manager.get_users()
 
 
 class AuthManagerDbTestCase(_AuthManagerBaseTestCase):

@@ -15,17 +15,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+# NOTE(vish): this forces the fixtures from tests/__init.py:setup() to work
+from nova.tests import *
+
 import webob.dec
 from nova import test
 
 from nova import context
-from nova import flags
 from nova.api.openstack.limits import RateLimitingMiddleware
 from nova.api.openstack.common import limited
 from nova.tests.api.openstack import fakes
 from webob import Request
-
-FLAGS = flags.FLAGS
 
 
 @webob.dec.wsgify

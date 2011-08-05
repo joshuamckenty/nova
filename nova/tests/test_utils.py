@@ -14,6 +14,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import datetime
 import os
 import tempfile
 
@@ -275,3 +276,111 @@ class GenericUtilsTestCase(test.TestCase):
         # error case
         result = utils.parse_server_string('www.exa:mple.com:8443')
         self.assertEqual(('', ''), result)
+
+    def test_bool_from_str(self):
+        self.assertTrue(utils.bool_from_str('1'))
+        self.assertTrue(utils.bool_from_str('2'))
+        self.assertTrue(utils.bool_from_str('-1'))
+        self.assertTrue(utils.bool_from_str('true'))
+        self.assertTrue(utils.bool_from_str('True'))
+        self.assertTrue(utils.bool_from_str('tRuE'))
+        self.assertFalse(utils.bool_from_str('False'))
+        self.assertFalse(utils.bool_from_str('false'))
+        self.assertFalse(utils.bool_from_str('0'))
+        self.assertFalse(utils.bool_from_str(None))
+        self.assertFalse(utils.bool_from_str('junk'))
+
+
+class IsUUIDLikeTestCase(test.TestCase):
+    def assertUUIDLike(self, val, expected):
+        result = utils.is_uuid_like(val)
+        self.assertEqual(result, expected)
+
+    def test_good_uuid(self):
+        val = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        self.assertUUIDLike(val, True)
+
+    def test_integer_passed(self):
+        val = 1
+        self.assertUUIDLike(val, False)
+
+    def test_non_uuid_string_passed(self):
+        val = 'foo-fooo'
+        self.assertUUIDLike(val, False)
+
+
+class ToPrimitiveTestCase(test.TestCase):
+    def test_list(self):
+        self.assertEquals(utils.to_primitive([1, 2, 3]), [1, 2, 3])
+
+    def test_empty_list(self):
+        self.assertEquals(utils.to_primitive([]), [])
+
+    def test_tuple(self):
+        self.assertEquals(utils.to_primitive((1, 2, 3)), [1, 2, 3])
+
+    def test_dict(self):
+        self.assertEquals(utils.to_primitive(dict(a=1, b=2, c=3)),
+                          dict(a=1, b=2, c=3))
+
+    def test_empty_dict(self):
+        self.assertEquals(utils.to_primitive({}), {})
+
+    def test_datetime(self):
+        x = datetime.datetime(1, 2, 3, 4, 5, 6, 7)
+        self.assertEquals(utils.to_primitive(x), "0001-02-03 04:05:06.000007")
+
+    def test_iter(self):
+        class IterClass(object):
+            def __init__(self):
+                self.data = [1, 2, 3, 4, 5]
+                self.index = 0
+
+            def __iter__(self):
+                return self
+
+            def next(self):
+                if self.index == len(self.data):
+                    raise StopIteration
+                self.index = self.index + 1
+                return self.data[self.index - 1]
+
+        x = IterClass()
+        self.assertEquals(utils.to_primitive(x), [1, 2, 3, 4, 5])
+
+    def test_iteritems(self):
+        class IterItemsClass(object):
+            def __init__(self):
+                self.data = dict(a=1, b=2, c=3).items()
+                self.index = 0
+
+            def __iter__(self):
+                return self
+
+            def next(self):
+                if self.index == len(self.data):
+                    raise StopIteration
+                self.index = self.index + 1
+                return self.data[self.index - 1]
+
+        x = IterItemsClass()
+        ordered = utils.to_primitive(x)
+        ordered.sort()
+        self.assertEquals(ordered, [['a', 1], ['b', 2], ['c', 3]])
+
+    def test_instance(self):
+        class MysteryClass(object):
+            a = 10
+
+            def __init__(self):
+                self.b = 1
+
+        x = MysteryClass()
+        self.assertEquals(utils.to_primitive(x, convert_instances=True),
+                          dict(b=1))
+
+        self.assertEquals(utils.to_primitive(x), x)
+
+    def test_typeerror(self):
+        x = bytearray  # Class, not instance
+        self.assertEquals(utils.to_primitive(x), u"<type 'bytearray'>")

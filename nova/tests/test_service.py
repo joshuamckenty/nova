@@ -30,9 +30,9 @@ from nova import rpc
 from nova import test
 from nova import service
 from nova import manager
+from nova import wsgi
 from nova.compute import manager as compute_manager
 
-FLAGS = flags.FLAGS
 flags.DEFINE_string("fake_manager", "nova.tests.test_service.FakeManager",
                     "Manager for testing")
 
@@ -106,91 +106,9 @@ class ServiceTestCase(test.TestCase):
 
         # NOTE(vish): Create was moved out of mox replay to make sure that
         #             the looping calls are created in StartService.
-        app = service.Service.create(host=host, binary=binary)
+        app = service.Service.create(host=host, binary=binary, topic=topic)
 
-        self.mox.StubOutWithMock(rpc,
-                                 'TopicAdapterConsumer',
-                                 use_mock_anything=True)
-        self.mox.StubOutWithMock(rpc,
-                                 'FanoutAdapterConsumer',
-                                 use_mock_anything=True)
-        rpc.TopicAdapterConsumer(connection=mox.IgnoreArg(),
-                            topic=topic,
-                            proxy=mox.IsA(service.Service)).AndReturn(
-                                    rpc.TopicAdapterConsumer)
-
-        rpc.TopicAdapterConsumer(connection=mox.IgnoreArg(),
-                            topic='%s.%s' % (topic, host),
-                            proxy=mox.IsA(service.Service)).AndReturn(
-                                    rpc.TopicAdapterConsumer)
-
-        rpc.FanoutAdapterConsumer(connection=mox.IgnoreArg(),
-                            topic=topic,
-                            proxy=mox.IsA(service.Service)).AndReturn(
-                                    rpc.FanoutAdapterConsumer)
-
-        rpc.TopicAdapterConsumer.attach_to_eventlet()
-        rpc.TopicAdapterConsumer.attach_to_eventlet()
-        rpc.FanoutAdapterConsumer.attach_to_eventlet()
-
-        service_create = {'host': host,
-                          'binary': binary,
-                          'topic': topic,
-                          'report_count': 0,
-                          'availability_zone': 'nova'}
-        service_ref = {'host': host,
-                       'binary': binary,
-                       'report_count': 0,
-                       'id': 1}
-
-        service.db.service_get_by_args(mox.IgnoreArg(),
-                                       host,
-                                       binary).AndRaise(exception.NotFound())
-        service.db.service_create(mox.IgnoreArg(),
-                                  service_create).AndReturn(service_ref)
-        self.mox.ReplayAll()
-
-        app.start()
-        app.stop()
         self.assert_(app)
-
-    # We're testing sort of weird behavior in how report_state decides
-    # whether it is disconnected, it looks for a variable on itself called
-    # 'model_disconnected' and report_state doesn't really do much so this
-    # these are mostly just for coverage
-    def test_report_state_no_service(self):
-        host = 'foo'
-        binary = 'bar'
-        topic = 'test'
-        service_create = {'host': host,
-                          'binary': binary,
-                          'topic': topic,
-                          'report_count': 0,
-                          'availability_zone': 'nova'}
-        service_ref = {'host': host,
-                          'binary': binary,
-                          'topic': topic,
-                          'report_count': 0,
-                          'availability_zone': 'nova',
-                          'id': 1}
-
-        service.db.service_get_by_args(mox.IgnoreArg(),
-                                      host,
-                                      binary).AndRaise(exception.NotFound())
-        service.db.service_create(mox.IgnoreArg(),
-                                  service_create).AndReturn(service_ref)
-        service.db.service_get(mox.IgnoreArg(),
-                               service_ref['id']).AndReturn(service_ref)
-        service.db.service_update(mox.IgnoreArg(), service_ref['id'],
-                                  mox.ContainsKeyValue('report_count', 1))
-
-        self.mox.ReplayAll()
-        serv = service.Service(host,
-                               binary,
-                               topic,
-                               'nova.tests.test_service.FakeManager')
-        serv.start()
-        serv.report_state()
 
     def test_report_state_newly_disconnected(self):
         host = 'foo'
@@ -262,43 +180,31 @@ class ServiceTestCase(test.TestCase):
 
         self.assert_(not serv.model_disconnected)
 
-    def test_compute_can_update_available_resource(self):
-        """Confirm compute updates their record of compute-service table."""
-        host = 'foo'
-        binary = 'nova-compute'
-        topic = 'compute'
 
-        # Any mocks are not working without UnsetStubs() here.
-        self.mox.UnsetStubs()
-        ctxt = context.get_admin_context()
-        service_ref = db.service_create(ctxt, {'host': host,
-                                               'binary': binary,
-                                               'topic': topic})
-        serv = service.Service(host,
-                               binary,
-                               topic,
-                               'nova.compute.manager.ComputeManager')
+class TestWSGIService(test.TestCase):
 
-        # This testcase want to test calling update_available_resource.
-        # No need to call periodic call, then below variable must be set 0.
-        serv.report_interval = 0
-        serv.periodic_interval = 0
+    def setUp(self):
+        super(TestWSGIService, self).setUp()
+        self.stubs.Set(wsgi.Loader, "load_app", mox.MockAnything())
 
-        # Creating mocks
-        self.mox.StubOutWithMock(service.rpc.Connection, 'instance')
-        service.rpc.Connection.instance(new=mox.IgnoreArg())
-        service.rpc.Connection.instance(new=mox.IgnoreArg())
-        service.rpc.Connection.instance(new=mox.IgnoreArg())
-        self.mox.StubOutWithMock(serv.manager.driver,
-                                 'update_available_resource')
-        serv.manager.driver.update_available_resource(mox.IgnoreArg(), host)
+    def test_service_random_port(self):
+        test_service = service.WSGIService("test_service")
+        self.assertEquals(0, test_service.port)
+        test_service.start()
+        self.assertNotEqual(0, test_service.port)
+        test_service.stop()
 
-        # Just doing start()-stop(), not confirm new db record is created,
-        # because update_available_resource() works only in
-        # libvirt environment. This testcase confirms
-        # update_available_resource() is called. Otherwise, mox complains.
-        self.mox.ReplayAll()
-        serv.start()
-        serv.stop()
 
-        db.service_destroy(ctxt, service_ref['id'])
+class TestLauncher(test.TestCase):
+
+    def setUp(self):
+        super(TestLauncher, self).setUp()
+        self.stubs.Set(wsgi.Loader, "load_app", mox.MockAnything())
+        self.service = service.WSGIService("test_service")
+
+    def test_launch_app(self):
+        self.assertEquals(0, self.service.port)
+        launcher = service.Launcher()
+        launcher.launch_service(self.service)
+        self.assertEquals(0, self.service.port)
+        launcher.stop()

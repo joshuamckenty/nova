@@ -35,6 +35,7 @@ import os
 import sys
 import traceback
 
+import nova
 from nova import flags
 from nova import version
 
@@ -42,8 +43,8 @@ from nova import version
 FLAGS = flags.FLAGS
 flags.DEFINE_string('logging_context_format_string',
                     '%(asctime)s %(levelname)s %(name)s '
-                    '[%(request_id)s %(user)s '
-                    '%(project)s] %(message)s',
+                    '[%(request_id)s %(user_id)s '
+                    '%(project_id)s] %(message)s',
                     'format string to use for log messages with context')
 flags.DEFINE_string('logging_default_format_string',
                     '%(asctime)s %(levelname)s %(name)s [-] '
@@ -63,6 +64,7 @@ flags.DEFINE_list('default_log_levels',
                    'eventlet.wsgi.server=WARN'],
                   'list of logger=LEVEL pairs')
 flags.DEFINE_bool('use_syslog', False, 'output to syslog')
+flags.DEFINE_bool('publish_errors', False, 'publish error events')
 flags.DEFINE_string('logfile', None, 'output to named file')
 
 
@@ -255,13 +257,22 @@ class NovaRootLogger(NovaLogger):
                 self.filelog = WatchedFileHandler(logpath)
                 self.addHandler(self.filelog)
                 self.logpath = logpath
+                os.chmod(self.logpath, FLAGS.logfile_mode)
         else:
             self.removeHandler(self.filelog)
             self.addHandler(self.streamlog)
+        if FLAGS.publish_errors:
+            self.addHandler(PublishErrorsHandler(ERROR))
         if FLAGS.verbose:
             self.setLevel(DEBUG)
         else:
             self.setLevel(INFO)
+
+
+class PublishErrorsHandler(logging.Handler):
+    def emit(self, record):
+        nova.notifier.api.notify('nova.error.publisher', 'error_notification',
+            nova.notifier.api.ERROR, dict(error=record.msg))
 
 
 def handle_exception(type, value, tb):
@@ -304,3 +315,14 @@ logging.setLoggerClass(NovaLogger)
 def audit(msg, *args, **kwargs):
     """Shortcut for logging to root log with sevrity 'AUDIT'."""
     logging.root.log(AUDIT, msg, *args, **kwargs)
+
+
+class WritableLogger(object):
+    """A thin wrapper that responds to `write` and logs."""
+
+    def __init__(self, logger, level=logging.INFO):
+        self.logger = logger
+        self.level = level
+
+    def write(self, msg):
+        self.logger.log(self.level, msg)

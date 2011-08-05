@@ -23,13 +23,15 @@ import sys
 import routes
 import webob.dec
 import webob.exc
+from xml.etree import ElementTree
 
 from nova import exception
 from nova import flags
 from nova import log as logging
-from nova import wsgi
+from nova import wsgi as base_wsgi
 from nova.api.openstack import common
 from nova.api.openstack import faults
+from nova.api.openstack import wsgi
 
 
 LOG = logging.getLogger('extensions')
@@ -115,28 +117,34 @@ class ExtensionDescriptor(object):
         return request_exts
 
 
-class ActionExtensionController(common.OpenstackController):
-
+class ActionExtensionController(object):
     def __init__(self, application):
-
         self.application = application
         self.action_handlers = {}
 
     def add_action(self, action_name, handler):
         self.action_handlers[action_name] = handler
 
-    def action(self, req, id):
-
-        input_dict = self._deserialize(req.body, req.get_content_type())
+    def action(self, req, id, body):
         for action_name, handler in self.action_handlers.iteritems():
-            if action_name in input_dict:
-                return handler(input_dict, req, id)
+            if action_name in body:
+                return handler(body, req, id)
         # no action handler found (bump to downstream application)
         res = self.application
         return res
 
 
-class RequestExtensionController(common.OpenstackController):
+class ActionExtensionResource(wsgi.Resource):
+
+    def __init__(self, application):
+        controller = ActionExtensionController(application)
+        wsgi.Resource.__init__(self, controller)
+
+    def add_action(self, action_name, handler):
+        self.controller.add_action(action_name, handler)
+
+
+class RequestExtensionController(object):
 
     def __init__(self, application):
         self.application = application
@@ -153,7 +161,17 @@ class RequestExtensionController(common.OpenstackController):
         return res
 
 
-class ExtensionController(common.OpenstackController):
+class RequestExtensionResource(wsgi.Resource):
+
+    def __init__(self, application):
+        controller = RequestExtensionController(application)
+        wsgi.Resource.__init__(self, controller)
+
+    def add_handler(self, handler):
+        self.controller.add_handler(handler)
+
+
+class ExtensionsResource(wsgi.Resource):
 
     def __init__(self, extension_manager):
         self.extension_manager = extension_manager
@@ -177,7 +195,7 @@ class ExtensionController(common.OpenstackController):
     def show(self, req, id):
         # NOTE(dprince): the extensions alias is used as the 'id' for show
         ext = self.extension_manager.extensions[id]
-        return self._translate(ext)
+        return dict(extension=self._translate(ext))
 
     def delete(self, req, id):
         raise faults.Fault(webob.exc.HTTPNotFound())
@@ -186,7 +204,7 @@ class ExtensionController(common.OpenstackController):
         raise faults.Fault(webob.exc.HTTPNotFound())
 
 
-class ExtensionMiddleware(wsgi.Middleware):
+class ExtensionMiddleware(base_wsgi.Middleware):
     """Extensions middleware for WSGI."""
     @classmethod
     def factory(cls, global_config, **local_config):
@@ -195,43 +213,43 @@ class ExtensionMiddleware(wsgi.Middleware):
             return cls(app, **local_config)
         return _factory
 
-    def _action_ext_controllers(self, application, ext_mgr, mapper):
-        """Return a dict of ActionExtensionController-s by collection."""
-        action_controllers = {}
+    def _action_ext_resources(self, application, ext_mgr, mapper):
+        """Return a dict of ActionExtensionResource-s by collection."""
+        action_resources = {}
         for action in ext_mgr.get_actions():
-            if not action.collection in action_controllers.keys():
-                controller = ActionExtensionController(application)
+            if not action.collection in action_resources.keys():
+                resource = ActionExtensionResource(application)
                 mapper.connect("/%s/:(id)/action.:(format)" %
                                 action.collection,
                                 action='action',
-                                controller=controller,
+                                controller=resource,
                                 conditions=dict(method=['POST']))
                 mapper.connect("/%s/:(id)/action" % action.collection,
                                 action='action',
-                                controller=controller,
+                                controller=resource,
                                 conditions=dict(method=['POST']))
-                action_controllers[action.collection] = controller
+                action_resources[action.collection] = resource
 
-        return action_controllers
+        return action_resources
 
-    def _request_ext_controllers(self, application, ext_mgr, mapper):
-        """Returns a dict of RequestExtensionController-s by collection."""
-        request_ext_controllers = {}
+    def _request_ext_resources(self, application, ext_mgr, mapper):
+        """Returns a dict of RequestExtensionResource-s by collection."""
+        request_ext_resources = {}
         for req_ext in ext_mgr.get_request_extensions():
-            if not req_ext.key in request_ext_controllers.keys():
-                controller = RequestExtensionController(application)
+            if not req_ext.key in request_ext_resources.keys():
+                resource = RequestExtensionResource(application)
                 mapper.connect(req_ext.url_route + '.:(format)',
                                 action='process',
-                                controller=controller,
+                                controller=resource,
                                 conditions=req_ext.conditions)
 
                 mapper.connect(req_ext.url_route,
                                 action='process',
-                                controller=controller,
+                                controller=resource,
                                 conditions=req_ext.conditions)
-                request_ext_controllers[req_ext.key] = controller
+                request_ext_resources[req_ext.key] = resource
 
-        return request_ext_controllers
+        return request_ext_resources
 
     def __init__(self, application, ext_mgr=None):
 
@@ -241,27 +259,30 @@ class ExtensionMiddleware(wsgi.Middleware):
 
         mapper = routes.Mapper()
 
+        serializer = wsgi.ResponseSerializer(
+            {'application/xml': ExtensionsXMLSerializer()})
         # extended resources
         for resource in ext_mgr.get_resources():
             LOG.debug(_('Extended resource: %s'),
                         resource.collection)
             mapper.resource(resource.collection, resource.collection,
-                            controller=resource.controller,
-                            collection=resource.collection_actions,
-                            member=resource.member_actions,
-                            parent_resource=resource.parent)
+                controller=wsgi.Resource(
+                    resource.controller, serializer=serializer),
+                collection=resource.collection_actions,
+                member=resource.member_actions,
+                parent_resource=resource.parent)
 
         # extended actions
-        action_controllers = self._action_ext_controllers(application, ext_mgr,
+        action_resources = self._action_ext_resources(application, ext_mgr,
                                                         mapper)
         for action in ext_mgr.get_actions():
             LOG.debug(_('Extended action: %s'), action.action_name)
-            controller = action_controllers[action.collection]
-            controller.add_action(action.action_name, action.handler)
+            resource = action_resources[action.collection]
+            resource.add_action(action.action_name, action.handler)
 
         # extended requests
-        req_controllers = self._request_ext_controllers(application, ext_mgr,
-                                                            mapper)
+        req_controllers = self._request_ext_resources(application, ext_mgr,
+                                                      mapper)
         for request_ext in ext_mgr.get_request_extensions():
             LOG.debug(_('Extended request: %s'), request_ext.key)
             controller = req_controllers[request_ext.key]
@@ -313,7 +334,7 @@ class ExtensionManager(object):
         """Returns a list of ResourceExtension objects."""
         resources = []
         resources.append(ResourceExtension('extensions',
-                                            ExtensionController(self)))
+                                            ExtensionsResource(self)))
         for alias, ext in self.extensions.iteritems():
             try:
                 resources.extend(ext.get_resources())
@@ -357,6 +378,8 @@ class ExtensionManager(object):
             LOG.debug(_('Ext updated: %s'), extension.get_updated())
         except AttributeError as ex:
             LOG.exception(_("Exception loading extension: %s"), unicode(ex))
+            return False
+        return True
 
     def _load_all_extensions(self):
         """Load extensions from the configured path.
@@ -395,14 +418,15 @@ class ExtensionManager(object):
                               'file': ext_path})
                     continue
                 new_ext = new_ext_class()
-                self._check_extension(new_ext)
-                self._add_extension(new_ext)
+                self.add_extension(new_ext)
 
-    def _add_extension(self, ext):
+    def add_extension(self, ext):
+        # Do nothing if the extension doesn't check out
+        if not self._check_extension(ext):
+            return
+
         alias = ext.get_alias()
         LOG.audit(_('Loaded extension: %s'), alias)
-
-        self._check_extension(ext)
 
         if alias in self.extensions:
             raise exception.Error("Found duplicate extension: %s" % alias)
@@ -410,7 +434,7 @@ class ExtensionManager(object):
 
 
 class RequestExtension(object):
-    """Extend requests and responses of core nova OpenStack API controllers.
+    """Extend requests and responses of core nova OpenStack API resources.
 
     Provide a way to add data to responses and handle custom request data
     that is sent to core nova OpenStack API controllers.
@@ -424,7 +448,7 @@ class RequestExtension(object):
 
 
 class ActionExtension(object):
-    """Add custom actions to core nova OpenStack API controllers."""
+    """Add custom actions to core nova OpenStack API resources."""
 
     def __init__(self, collection, action_name, handler):
         self.collection = collection
@@ -442,3 +466,40 @@ class ResourceExtension(object):
         self.parent = parent
         self.collection_actions = collection_actions
         self.member_actions = member_actions
+
+
+class ExtensionsXMLSerializer(wsgi.XMLDictSerializer):
+
+    def show(self, ext_dict):
+        ext = self._create_ext_elem(ext_dict['extension'])
+        return self._to_xml(ext)
+
+    def index(self, exts_dict):
+        exts = ElementTree.Element('extensions')
+        for ext_dict in exts_dict['extensions']:
+            exts.append(self._create_ext_elem(ext_dict))
+        return self._to_xml(exts)
+
+    def _create_ext_elem(self, ext_dict):
+        """Create an extension xml element from a dict."""
+        ext_elem = ElementTree.Element('extension')
+        ext_elem.set('name', ext_dict['name'])
+        ext_elem.set('namespace', ext_dict['namespace'])
+        ext_elem.set('alias', ext_dict['alias'])
+        ext_elem.set('updated', ext_dict['updated'])
+        desc = ElementTree.Element('description')
+        desc.text = ext_dict['description']
+        ext_elem.append(desc)
+        for link in ext_dict.get('links', []):
+            elem = ElementTree.Element('atom:link')
+            elem.set('rel', link['rel'])
+            elem.set('href', link['href'])
+            elem.set('type', link['type'])
+            ext_elem.append(elem)
+        return ext_elem
+
+    def _to_xml(self, root):
+        """Convert the xml tree object to an xml string."""
+        root.set('xmlns', wsgi.XMLNS_V11)
+        root.set('xmlns:atom', wsgi.XMLNS_ATOM)
+        return ElementTree.tostring(root, encoding='UTF-8')

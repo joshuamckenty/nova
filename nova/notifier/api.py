@@ -11,14 +11,15 @@
 #    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
-#    under the License.import datetime
+#    under the License.
 
-import datetime
 import uuid
 
 from nova import flags
 from nova import utils
+from nova import log as logging
 
+LOG = logging.getLogger('nova.exception')
 
 FLAGS = flags.FLAGS
 
@@ -36,6 +37,12 @@ log_levels = (DEBUG, WARN, INFO, ERROR, CRITICAL)
 
 class BadPriorityException(Exception):
     pass
+
+
+def publisher_id(service, host=None):
+    if not host:
+        host = FLAGS.host
+    return "%s.%s" % (service, host)
 
 
 def notify(publisher_id, event_type, priority, payload):
@@ -64,7 +71,7 @@ def notify(publisher_id, event_type, priority, payload):
 
     {'message_id': str(uuid.uuid4()),
      'publisher_id': 'compute.host1',
-     'timestamp': datetime.datetime.utcnow(),
+     'timestamp': utils.utcnow(),
      'priority': 'WARN',
      'event_type': 'compute.create_instance',
      'payload': {'instance_id': 12, ... }}
@@ -73,11 +80,19 @@ def notify(publisher_id, event_type, priority, payload):
     if priority not in log_levels:
         raise BadPriorityException(
                  _('%s not in valid priorities' % priority))
+
+    # Ensure everything is JSON serializable.
+    payload = utils.to_primitive(payload, convert_instances=True)
+
     driver = utils.import_object(FLAGS.notification_driver)
     msg = dict(message_id=str(uuid.uuid4()),
                    publisher_id=publisher_id,
                    event_type=event_type,
                    priority=priority,
                    payload=payload,
-                   timestamp=str(datetime.datetime.utcnow()))
-    driver.notify(msg)
+                   timestamp=str(utils.utcnow()))
+    try:
+        driver.notify(msg)
+    except Exception, e:
+        LOG.exception(_("Problem '%(e)s' attempting to "
+                        "send to notification system." % locals()))

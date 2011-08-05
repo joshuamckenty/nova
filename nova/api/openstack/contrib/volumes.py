@@ -16,16 +16,18 @@
 """The volumes extension."""
 
 from webob import exc
+import webob
 
 from nova import compute
 from nova import exception
 from nova import flags
 from nova import log as logging
+from nova import quota
 from nova import volume
-from nova import wsgi
 from nova.api.openstack import common
 from nova.api.openstack import extensions
 from nova.api.openstack import faults
+from nova.api.openstack import servers
 
 
 LOG = logging.getLogger("nova.api.volumes")
@@ -64,7 +66,7 @@ def _translate_volume_summary_view(context, vol):
     return d
 
 
-class VolumeController(wsgi.Controller):
+class VolumeController(object):
     """The Volumes API controller for the OpenStack API."""
 
     _serialization_metadata = {
@@ -105,7 +107,7 @@ class VolumeController(wsgi.Controller):
             self.volume_api.delete(context, volume_id=id)
         except exception.NotFound:
             return faults.Fault(exc.HTTPNotFound())
-        return exc.HTTPAccepted()
+        return webob.Response(status_int=202)
 
     def index(self, req):
         """Returns a summary list of volumes."""
@@ -124,18 +126,17 @@ class VolumeController(wsgi.Controller):
         res = [entity_maker(context, vol) for vol in limited_list]
         return {'volumes': res}
 
-    def create(self, req):
+    def create(self, req, body):
         """Creates a new volume."""
         context = req.environ['nova.context']
 
-        env = self._deserialize(req.body, req.get_content_type())
-        if not env:
+        if not body:
             return faults.Fault(exc.HTTPUnprocessableEntity())
 
-        vol = env['volume']
+        vol = body['volume']
         size = vol['size']
         LOG.audit(_("Create volume of %s GB"), size, context=context)
-        new_volume = self.volume_api.create(context, size,
+        new_volume = self.volume_api.create(context, size, None,
                                             vol.get('display_name'),
                                             vol.get('display_description'))
 
@@ -175,7 +176,7 @@ def _translate_attachment_summary_view(_context, vol):
     return d
 
 
-class VolumeAttachmentController(wsgi.Controller):
+class VolumeAttachmentController(object):
     """The volume attachment API controller for the Openstack API.
 
     A child resource of the server.  Note that we use the volume id
@@ -219,17 +220,16 @@ class VolumeAttachmentController(wsgi.Controller):
         return {'volumeAttachment': _translate_attachment_detail_view(context,
                                                                       vol)}
 
-    def create(self, req, server_id):
+    def create(self, req, server_id, body):
         """Attach a volume to an instance."""
         context = req.environ['nova.context']
 
-        env = self._deserialize(req.body, req.get_content_type())
-        if not env:
+        if not body:
             return faults.Fault(exc.HTTPUnprocessableEntity())
 
         instance_id = server_id
-        volume_id = env['volumeAttachment']['volumeId']
-        device = env['volumeAttachment']['device']
+        volume_id = body['volumeAttachment']['volumeId']
+        device = body['volumeAttachment']['device']
 
         msg = _("Attach volume %(volume_id)s to instance %(server_id)s"
                 " at %(device)s") % locals()
@@ -259,7 +259,7 @@ class VolumeAttachmentController(wsgi.Controller):
         # TODO(justinsb): How do I return "accepted" here?
         return {'volumeAttachment': attachment}
 
-    def update(self, _req, _server_id, _id):
+    def update(self, req, server_id, id, body):
         """Update a volume attachment.  We don't currently support this."""
         return faults.Fault(exc.HTTPBadRequest())
 
@@ -282,7 +282,7 @@ class VolumeAttachmentController(wsgi.Controller):
         self.compute_api.detach_volume(context,
                                        volume_id=volume_id)
 
-        return exc.HTTPAccepted()
+        return webob.Response(status_int=202)
 
     def _items(self, req, server_id, entity_maker):
         """Returns a list of attachments, transformed through entity_maker."""
@@ -299,12 +299,59 @@ class VolumeAttachmentController(wsgi.Controller):
         return {'volumeAttachments': res}
 
 
+class BootFromVolumeController(servers.ControllerV11):
+    """The boot from volume API controller for the Openstack API."""
+
+    def _create_instance(self, context, instance_type, image_href, **kwargs):
+        try:
+            return self.compute_api.create(context, instance_type,
+                                           image_href, **kwargs)
+        except quota.QuotaError as error:
+            self.helper._handle_quota_error(error)
+        except exception.ImageNotFound as error:
+            msg = _("Can not find requested image")
+            raise faults.Fault(exc.HTTPBadRequest(explanation=msg))
+
+    def create(self, req, body):
+        """ Creates a new server for a given user """
+        extra_values = None
+        try:
+
+            def get_kwargs(context, instance_type, image_href, **kwargs):
+                kwargs['context'] = context
+                kwargs['instance_type'] = instance_type
+                kwargs['image_href'] = image_href
+                return kwargs
+
+            extra_values, kwargs = self.helper.create_instance(req, body,
+                                                               get_kwargs)
+
+            block_device_mapping = body['server'].get('block_device_mapping')
+            kwargs['block_device_mapping'] = block_device_mapping
+
+            instances = self._create_instance(**kwargs)
+        except faults.Fault, f:
+            return f
+
+        # We can only return 1 instance via the API, if we happen to
+        # build more than one...  instances is a list, so we'll just
+        # use the first one..
+        inst = instances[0]
+        for key in ['instance_type', 'image_ref']:
+            inst[key] = extra_values[key]
+
+        builder = self._get_view_builder(req)
+        server = builder.build(inst, is_detail=True)
+        server['server']['adminPass'] = extra_values['password']
+        return server
+
+
 class Volumes(extensions.ExtensionDescriptor):
     def get_name(self):
         return "Volumes"
 
     def get_alias(self):
-        return "VOLUMES"
+        return "os-volumes"
 
     def get_description(self):
         return "Volumes support"
@@ -320,16 +367,20 @@ class Volumes(extensions.ExtensionDescriptor):
 
         # NOTE(justinsb): No way to provide singular name ('volume')
         # Does this matter?
-        res = extensions.ResourceExtension('volumes',
+        res = extensions.ResourceExtension('os-volumes',
                                         VolumeController(),
                                         collection_actions={'detail': 'GET'})
         resources.append(res)
 
-        res = extensions.ResourceExtension('volume_attachments',
+        res = extensions.ResourceExtension('os-volume_attachments',
                                            VolumeAttachmentController(),
                                            parent=dict(
                                                 member_name='server',
                                                 collection_name='servers'))
+        resources.append(res)
+
+        res = extensions.ResourceExtension('os-volumes_boot',
+                                           BootFromVolumeController())
         resources.append(res)
 
         return resources

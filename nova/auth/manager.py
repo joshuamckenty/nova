@@ -73,6 +73,12 @@ flags.DEFINE_string('auth_driver', 'nova.auth.dbdriver.DbDriver',
 LOG = logging.getLogger('nova.auth.manager')
 
 
+if FLAGS.memcached_servers:
+    import memcache
+else:
+    from nova import fakememcache as memcache
+
+
 class AuthBase(object):
     """Base class for objects relating to auth
 
@@ -206,6 +212,7 @@ class AuthManager(object):
     """
 
     _instance = None
+    mc = None
 
     def __new__(cls, *args, **kwargs):
         """Returns the AuthManager singleton"""
@@ -222,13 +229,8 @@ class AuthManager(object):
         self.network_manager = utils.import_object(FLAGS.network_manager)
         if driver or not getattr(self, 'driver', None):
             self.driver = utils.import_class(driver or FLAGS.auth_driver)
-
-        if FLAGS.memcached_servers:
-            import memcache
-        else:
-            from nova import fakememcache as memcache
-        self.mc = memcache.Client(FLAGS.memcached_servers,
-                                  debug=0)
+        if AuthManager.mc is None:
+            AuthManager.mc = memcache.Client(FLAGS.memcached_servers, debug=0)
 
     def authenticate(self, access, signature, params, verb='GET',
                      server_string='127.0.0.1:8773', path='/',
@@ -516,6 +518,14 @@ class AuthManager(object):
             return drv.get_user_roles(User.safe_id(user),
                                       Project.safe_id(project))
 
+    def get_active_roles(self, user, project=None):
+        """Get all active roles for context"""
+        if project:
+            roles = FLAGS.allowed_roles + ['projectmanager']
+        else:
+            roles = FLAGS.global_roles
+        return [role for role in roles if self.has_role(user, role, project)]
+
     def get_project(self, pid):
         """Get project object by id"""
         with self.driver() as drv:
@@ -628,13 +638,17 @@ class AuthManager(object):
         not been allocated for user.
         """
 
-        network_ref = db.project_get_network(context.get_admin_context(),
-                                             Project.safe_id(project), False)
-
-        if not network_ref:
+        networks = db.project_get_networks(context.get_admin_context(),
+                                           Project.safe_id(project), False)
+        if not networks:
             return (None, None)
-        return (network_ref['vpn_public_address'],
-                network_ref['vpn_public_port'])
+
+        # TODO(tr3buchet): not sure what you guys plan on doing with this
+        # but it's possible for a project to have multiple sets of vpn data
+        # for now I'm just returning the first one
+        network = networks[0]
+        return (network['vpn_public_address'],
+                network['vpn_public_port'])
 
     def delete_project(self, project):
         """Deletes a project"""
@@ -724,10 +738,6 @@ class AuthManager(object):
         with self.driver() as drv:
             drv.modify_user(uid, access_key, secret_key, admin)
 
-    @staticmethod
-    def get_key_pairs(context):
-        return db.key_pair_get_all_by_user(context.elevated(), context.user_id)
-
     def get_credentials(self, user, project=None, use_dmz=True):
         """Get credential zip for user in project"""
         if not isinstance(user, User):
@@ -779,7 +789,7 @@ class AuthManager(object):
         return read_buffer
 
     def get_environment_rc(self, user, project=None, use_dmz=True):
-        """Get credential zip for user in project"""
+        """Get environment rc for user in project"""
         if not isinstance(user, User):
             user = self.get_user(user)
         if project is None:

@@ -19,9 +19,7 @@ import time
 
 from webob import exc
 
-from nova.api.openstack import common
-from nova.api.openstack import faults
-import nova.image.service
+from nova.api.openstack import wsgi
 
 
 def _translate_keys(inst):
@@ -29,30 +27,41 @@ def _translate_keys(inst):
     return dict(backupSchedule=inst)
 
 
-class Controller(common.OpenstackController):
+class Controller(object):
     """ The backup schedule API controller for the Openstack API """
-
-    _serialization_metadata = {
-        'application/xml': {
-            'attributes': {
-                'backupSchedule': []}}}
 
     def __init__(self):
         pass
 
-    def index(self, req, server_id):
+    def index(self, req, server_id, **kwargs):
         """ Returns the list of backup schedules for a given instance """
-        return faults.Fault(exc.HTTPNotImplemented())
+        raise exc.HTTPNotImplemented()
 
-    def show(self, req, server_id, id):
+    def show(self, req, server_id, id, **kwargs):
         """ Returns a single backup schedule for a given instance """
-        return faults.Fault(exc.HTTPNotImplemented())
+        raise exc.HTTPNotImplemented()
 
-    def create(self, req, server_id):
+    def create(self, req, server_id, **kwargs):
         """ No actual update method required, since the existing API allows
         both create and update through a POST """
-        return faults.Fault(exc.HTTPNotImplemented())
+        raise exc.HTTPNotImplemented()
 
-    def delete(self, req, server_id, id):
+    def delete(self, req, server_id, id, **kwargs):
         """ Deletes an existing backup schedule """
-        return faults.Fault(exc.HTTPNotImplemented())
+        raise exc.HTTPNotImplemented()
+
+
+def create_resource():
+    metadata = {
+        'attributes': {
+            'backupSchedule': [],
+        },
+    }
+
+    body_serializers = {
+        'application/xml': wsgi.XMLDictSerializer(xmlns=wsgi.XMLNS_V10,
+                                                  metadata=metadata),
+    }
+
+    serializer = wsgi.ResponseSerializer(body_serializers)
+    return wsgi.Resource(Controller(), serializer=serializer)

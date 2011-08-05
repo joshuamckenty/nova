@@ -67,11 +67,13 @@
             <target dev='${disk_prefix}b' bus='${disk_bus}'/>
         </disk>
     #else
+        #if not ($getVar('ebs_root', False))
         <disk type='file'>
             <driver type='${driver_type}'/>
             <source file='${basepath}/disk'/>
             <target dev='${disk_prefix}a' bus='${disk_bus}'/>
         </disk>
+        #end if
         #if $getVar('local', False)
             <disk type='file'>
                 <driver type='${driver_type}'/>
@@ -79,10 +81,37 @@
                 <target dev='${disk_prefix}b' bus='${disk_bus}'/>
             </disk>
         #end if
+        #for $vol in $volumes
+            <disk type='${vol.type}'>
+                <driver type='raw'/>
+                #if $vol.type == 'network'
+                <source protocol='${vol.protocol}' name='${vol.name}'/>
+                #else
+                <source dev='${vol.device_path}'/>
+                #end if
+                <target dev='${vol.mount_device}' bus='${disk_bus}'/>
+            </disk>
+        #end for
     #end if
 #end if
 
 #for $nic in $nics
+    #if $vif_type == 'ethernet'
+        <interface type='ethernet'>
+            <target dev='${nic.name}' />
+            <mac address='${nic.mac_address}' />
+            <script path='${nic.script}' />
+        </interface>
+    #else if $vif_type == '802.1Qbh'
+       <interface type='direct'>
+            <mac address='${nic.mac_address}'/>
+            <source dev='${nic.device_name}' mode='private'/>
+            <virtualport type='802.1Qbh'>
+                <parameters profileid='${nic.profile_name}'/>
+            </virtualport>
+            <model type='virtio'/>
+       </interface>
+    #else
         <interface type='bridge'>
             <source bridge='${nic.bridge_name}'/>
             <mac address='${nic.mac_address}'/>
@@ -98,6 +127,8 @@
 #end if
             </filterref>
         </interface>
+    #end if
+
 #end for
         <!-- The order is significant here.  File must be defined first -->
         <serial type="file">
@@ -116,7 +147,7 @@
         </serial>
 
 #if $getVar('vncserver_host', False)
-        <graphics type='vnc' port='-1' autoport='yes' keymap='en-us' listen='${vncserver_host}'/>
+        <graphics type='vnc' port='-1' autoport='yes' keymap='${vnc_keymap}' listen='${vncserver_host}'/>
 #end if
     </devices>
 </domain>

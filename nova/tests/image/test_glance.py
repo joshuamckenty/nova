@@ -31,10 +31,13 @@ class StubGlanceClient(object):
         self.add_response = add_response
         self.update_response = update_response
 
+    def set_auth_token(self, auth_tok):
+        pass
+
     def get_image_meta(self, image_id):
         return self.images[image_id]
 
-    def get_images_detailed(self):
+    def get_images_detailed(self, filters=None, marker=None, limit=None):
         return self.images.itervalues()
 
     def get_image(self, image_id):
@@ -60,10 +63,8 @@ class BaseGlanceTest(unittest.TestCase):
     NOW_DATETIME = datetime.datetime(2010, 10, 11, 10, 30, 22)
 
     def setUp(self):
-        # FIXME(sirp): we can probably use stubs library here rather than
-        # dependency injection
         self.client = StubGlanceClient(None)
-        self.service = glance.GlanceImageService(self.client)
+        self.service = glance.GlanceImageService(client=self.client)
         self.context = context.RequestContext(None, None)
 
     def assertDateTimesFilled(self, image_meta):

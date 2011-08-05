@@ -19,8 +19,9 @@ from nova import exception
 from nova import flags
 from nova import log as logging
 from nova.api.openstack import common
-from nova.api.openstack import faults
+from nova.api.openstack import wsgi
 from nova.auth import manager
+
 
 FLAGS = flags.FLAGS
 LOG = logging.getLogger('nova.api.openstack')
@@ -34,12 +35,7 @@ def _translate_keys(user):
                 admin=user.admin)
 
 
-class Controller(common.OpenstackController):
-
-    _serialization_metadata = {
-        'application/xml': {
-            "attributes": {
-                "user": ["id", "name", "access", "secret", "admin"]}}}
+class Controller(object):
 
     def __init__(self):
         self.manager = manager.AuthManager()
@@ -72,7 +68,7 @@ class Controller(common.OpenstackController):
             user = None
 
         if user is None:
-            raise faults.Fault(exc.HTTPNotFound())
+            raise exc.HTTPNotFound()
 
         return dict(user=_translate_keys(user))
 
@@ -81,23 +77,37 @@ class Controller(common.OpenstackController):
         self.manager.delete_user(id)
         return {}
 
-    def create(self, req):
+    def create(self, req, body):
         self._check_admin(req.environ['nova.context'])
-        env = self._deserialize(req.body, req.get_content_type())
-        is_admin = env['user'].get('admin') in ('T', 'True', True)
-        name = env['user'].get('name')
-        access = env['user'].get('access')
-        secret = env['user'].get('secret')
+        is_admin = body['user'].get('admin') in ('T', 'True', True)
+        name = body['user'].get('name')
+        access = body['user'].get('access')
+        secret = body['user'].get('secret')
         user = self.manager.create_user(name, access, secret, is_admin)
         return dict(user=_translate_keys(user))
 
-    def update(self, req, id):
+    def update(self, req, id, body):
         self._check_admin(req.environ['nova.context'])
-        env = self._deserialize(req.body, req.get_content_type())
-        is_admin = env['user'].get('admin')
+        is_admin = body['user'].get('admin')
         if is_admin is not None:
             is_admin = is_admin in ('T', 'True', True)
-        access = env['user'].get('access')
-        secret = env['user'].get('secret')
+        access = body['user'].get('access')
+        secret = body['user'].get('secret')
         self.manager.modify_user(id, access, secret, is_admin)
         return dict(user=_translate_keys(self.manager.get_user(id)))
+
+
+def create_resource():
+    metadata = {
+        "attributes": {
+            "user": ["id", "name", "access", "secret", "admin"],
+        },
+    }
+
+    body_serializers = {
+        'application/xml': wsgi.XMLDictSerializer(metadata=metadata),
+    }
+
+    serializer = wsgi.ResponseSerializer(body_serializers)
+
+    return wsgi.Resource(Controller(), serializer=serializer)

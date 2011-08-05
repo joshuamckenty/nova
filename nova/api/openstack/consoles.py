@@ -16,11 +16,11 @@
 #    under the License.
 
 from webob import exc
+import webob
 
 from nova import console
 from nova import exception
-from nova.api.openstack import common
-from nova.api.openstack import faults
+from nova.api.openstack import wsgi
 
 
 def _translate_keys(cons):
@@ -43,17 +43,11 @@ def _translate_detail_keys(cons):
     return dict(console=info)
 
 
-class Controller(common.OpenstackController):
-    """The Consoles Controller for the Openstack API"""
-
-    _serialization_metadata = {
-        'application/xml': {
-            'attributes': {
-                'console': []}}}
+class Controller(object):
+    """The Consoles controller for the Openstack API"""
 
     def __init__(self):
         self.console_api = console.API()
-        super(Controller, self).__init__()
 
     def index(self, req, server_id):
         """Returns a list of consoles for this instance"""
@@ -63,9 +57,8 @@ class Controller(common.OpenstackController):
         return dict(consoles=[_translate_keys(console)
                               for console in consoles])
 
-    def create(self, req, server_id):
+    def create(self, req, server_id, body):
         """Creates a new console"""
-        #info = self._deserialize(req.body, req.get_content_type())
         self.console_api.create_console(
                                 req.environ['nova.context'],
                                 int(server_id))
@@ -78,12 +71,12 @@ class Controller(common.OpenstackController):
                                         int(server_id),
                                         int(id))
         except exception.NotFound:
-            return faults.Fault(exc.HTTPNotFound())
+            raise exc.HTTPNotFound()
         return _translate_detail_keys(console)
 
     def update(self, req, server_id, id):
         """You can't update a console"""
-        raise faults.Fault(exc.HTTPNotImplemented())
+        raise exc.HTTPNotImplemented()
 
     def delete(self, req, server_id, id):
         """Deletes a console"""
@@ -92,5 +85,9 @@ class Controller(common.OpenstackController):
                                             int(server_id),
                                             int(id))
         except exception.NotFound:
-            return faults.Fault(exc.HTTPNotFound())
-        return exc.HTTPAccepted()
+            raise exc.HTTPNotFound()
+        return webob.Response(status_int=202)
+
+
+def create_resource():
+    return wsgi.Resource(Controller())

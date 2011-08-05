@@ -19,14 +19,11 @@
 Test suite for VMWareAPI.
 """
 
-import stubout
-
 from nova import context
 from nova import db
 from nova import flags
 from nova import test
 from nova import utils
-from nova.auth import manager
 from nova.compute import power_state
 from nova.tests.glance import stubs as glance_stubs
 from nova.tests.vmwareapi import db_fakes
@@ -43,40 +40,62 @@ class VMWareAPIVMTestCase(test.TestCase):
 
     def setUp(self):
         super(VMWareAPIVMTestCase, self).setUp()
+        self.context = context.RequestContext('fake', 'fake', False)
         self.flags(vmwareapi_host_ip='test_url',
                    vmwareapi_host_username='test_username',
                    vmwareapi_host_password='test_pass')
-        self.manager = manager.AuthManager()
-        self.user = self.manager.create_user('fake', 'fake', 'fake',
-                                             admin=True)
-        self.project = self.manager.create_project('fake', 'fake', 'fake')
+        self.user_id = 'fake'
+        self.project_id = 'fake'
+        self.context = context.RequestContext(self.user_id, self.project_id)
         self.network = utils.import_object(FLAGS.network_manager)
-        self.stubs = stubout.StubOutForTesting()
         vmwareapi_fake.reset()
         db_fakes.stub_out_db_instance_api(self.stubs)
         stubs.set_stubs(self.stubs)
-        glance_stubs.stubout_glance_client(self.stubs,
-                                           glance_stubs.FakeGlance)
+        glance_stubs.stubout_glance_client(self.stubs)
         self.conn = vmwareapi_conn.get_connection(False)
+        # NOTE(vish): none of the network plugging code is actually
+        #             being tested
+        self.network_info = [({'bridge': 'fa0',
+                               'id': 0,
+                               'vlan': None,
+                               'bridge_interface': None,
+                               'injected': True},
+                          {'broadcast': '192.168.0.255',
+                           'dns': ['192.168.0.1'],
+                           'gateway': '192.168.0.1',
+                           'gateway6': 'dead:beef::1',
+                           'ip6s': [{'enabled': '1',
+                                     'ip': 'dead:beef::dcad:beff:feef:0',
+                                           'netmask': '64'}],
+                           'ips': [{'enabled': '1',
+                                    'ip': '192.168.0.100',
+                                    'netmask': '255.255.255.0'}],
+                           'label': 'fake',
+                           'mac': 'DE:AD:BE:EF:00:00',
+                           'rxtx_cap': 3})]
+
+    def tearDown(self):
+        super(VMWareAPIVMTestCase, self).tearDown()
+        vmwareapi_fake.cleanup()
 
     def _create_instance_in_the_db(self):
         values = {'name': 1,
                   'id': 1,
-                  'project_id': self.project.id,
-                  'user_id': self.user.id,
-                  'image_id': "1",
+                  'project_id': self.project_id,
+                  'user_id': self.user_id,
+                  'image_ref': "1",
                   'kernel_id': "1",
                   'ramdisk_id': "1",
+                  'mac_address': "de:ad:be:ef:be:ef",
                   'instance_type': 'm1.large',
-                  'mac_address': 'aa:bb:cc:dd:ee:ff',
                   }
-        self.instance = db.instance_create(values)
+        self.instance = db.instance_create(None, values)
 
     def _create_vm(self):
         """Create and spawn the VM."""
         self._create_instance_in_the_db()
         self.type_data = db.instance_type_get_by_name(None, 'm1.large')
-        self.conn.spawn(self.instance)
+        self.conn.spawn(self.context, self.instance, self.network_info)
         self._check_vm_record()
 
     def _check_vm_record(self):
@@ -138,20 +157,20 @@ class VMWareAPIVMTestCase(test.TestCase):
         self._create_vm()
         info = self.conn.get_info(1)
         self._check_vm_info(info, power_state.RUNNING)
-        self.conn.snapshot(self.instance, "Test-Snapshot")
+        self.conn.snapshot(self.context, self.instance, "Test-Snapshot")
         info = self.conn.get_info(1)
         self._check_vm_info(info, power_state.RUNNING)
 
     def test_snapshot_non_existent(self):
         self._create_instance_in_the_db()
-        self.assertRaises(Exception, self.conn.snapshot, self.instance,
-                          "Test-Snapshot")
+        self.assertRaises(Exception, self.conn.snapshot, self.context,
+                          self.instance, "Test-Snapshot")
 
     def test_reboot(self):
         self._create_vm()
         info = self.conn.get_info(1)
         self._check_vm_info(info, power_state.RUNNING)
-        self.conn.reboot(self.instance)
+        self.conn.reboot(self.instance, self.network_info)
         info = self.conn.get_info(1)
         self._check_vm_info(info, power_state.RUNNING)
 
@@ -215,13 +234,14 @@ class VMWareAPIVMTestCase(test.TestCase):
         self._check_vm_info(info, power_state.RUNNING)
         instances = self.conn.list_instances()
         self.assertEquals(len(instances), 1)
-        self.conn.destroy(self.instance)
+        self.conn.destroy(self.instance, self.network_info)
         instances = self.conn.list_instances()
         self.assertEquals(len(instances), 0)
 
     def test_destroy_non_existent(self):
         self._create_instance_in_the_db()
-        self.assertEquals(self.conn.destroy(self.instance), None)
+        self.assertEquals(self.conn.destroy(self.instance, self.network_info),
+                          None)
 
     def test_pause(self):
         pass
@@ -243,10 +263,3 @@ class VMWareAPIVMTestCase(test.TestCase):
         Dummy callback function to be passed to suspend, resume, etc., calls.
         """
         pass
-
-    def tearDown(self):
-        super(VMWareAPIVMTestCase, self).tearDown()
-        vmwareapi_fake.cleanup()
-        self.manager.delete_project(self.project)
-        self.manager.delete_user(self.user)
-        self.stubs.UnsetAll()

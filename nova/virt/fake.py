@@ -82,6 +82,21 @@ class FakeConnection(driver.ComputeDriver):
 
     def __init__(self):
         self.instances = {}
+        self.host_status = {
+          'host_name-description': 'Fake Host',
+          'host_hostname': 'fake-mini',
+          'host_memory_total': 8000000000,
+          'host_memory_overhead': 10000000,
+          'host_memory_free': 7900000000,
+          'host_memory_free_computed': 7900000000,
+          'host_other_config': {},
+          'host_ip_address': '192.168.1.109',
+          'host_cpu_info': {},
+          'disk_available': 500000000000,
+          'disk_total': 600000000000,
+          'disk_used': 100000000000,
+          'host_uuid': 'cedb9b39-9388-41df-8891-c5c9a0c0fe5f',
+          'host_name_label': 'fake-mini'}
 
     @classmethod
     def instance(cls):
@@ -114,7 +129,8 @@ class FakeConnection(driver.ComputeDriver):
             info_list.append(self._map_to_instance_info(instance))
         return info_list
 
-    def spawn(self, instance):
+    def spawn(self, context, instance, network_info,
+              block_device_mapping=None):
         """
         Create a new instance/VM/domain on the virtualization platform.
 
@@ -138,7 +154,7 @@ class FakeConnection(driver.ComputeDriver):
         fake_instance = FakeInstance(name, state)
         self.instances[name] = fake_instance
 
-    def snapshot(self, instance, name):
+    def snapshot(self, context, instance, name):
         """
         Snapshots the specified instance.
 
@@ -152,7 +168,7 @@ class FakeConnection(driver.ComputeDriver):
         """
         pass
 
-    def reboot(self, instance):
+    def reboot(self, instance, network_info):
         """
         Reboot the specified instance.
 
@@ -210,16 +226,35 @@ class FakeConnection(driver.ComputeDriver):
         """
         pass
 
-    def rescue(self, instance):
+    def agent_update(self, instance, url, md5hash):
+        """
+        Update agent on the specified instance.
+
+        The first parameter is an instance of nova.compute.service.Instance,
+        and so the instance is being specified as instance.name. The second
+        parameter is the URL of the agent to be fetched and updated on the
+        instance; the third is the md5 hash of the file for verification
+        purposes.
+
+        The work will be done asynchronously.  This function returns a
+        task that allows the caller to detect when it is complete.
+        """
+        pass
+
+    def rescue(self, context, instance, callback, network_info):
         """
         Rescue the specified instance.
         """
         pass
 
-    def unrescue(self, instance):
+    def unrescue(self, instance, callback, network_info):
         """
         Unrescue the specified instance.
         """
+        pass
+
+    def poll_rescued_instances(self, timeout):
+        """Poll for rescued instances"""
         pass
 
     def migrate_disk_and_power_off(self, instance, dest):
@@ -259,7 +294,7 @@ class FakeConnection(driver.ComputeDriver):
         """
         pass
 
-    def destroy(self, instance):
+    def destroy(self, instance, network_info):
         key = instance.name
         if key in self.instances:
             del self.instances[key]
@@ -306,8 +341,7 @@ class FakeConnection(driver.ComputeDriver):
         only useful for giving back to this layer as a parameter to
         disk_stats).  These IDs only need to be unique for a given instance.
 
-        Note that this function takes an instance ID, not a
-        compute.service.Instance, so that it can be called by compute.monitor.
+        Note that this function takes an instance ID.
         """
         return ['A_DISK']
 
@@ -319,8 +353,7 @@ class FakeConnection(driver.ComputeDriver):
         interface_stats).  These IDs only need to be unique for a given
         instance.
 
-        Note that this function takes an instance ID, not a
-        compute.service.Instance, so that it can be called by compute.monitor.
+        Note that this function takes an instance ID.
         """
         return ['A_VIF']
 
@@ -340,8 +373,7 @@ class FakeConnection(driver.ComputeDriver):
         having to do the aggregation.  On those platforms, this method is
         unused.
 
-        Note that this function takes an instance ID, not a
-        compute.service.Instance, so that it can be called by compute.monitor.
+        Note that this function takes an instance ID.
         """
         return [0L, 0L, 0L, 0L, None]
 
@@ -361,8 +393,7 @@ class FakeConnection(driver.ComputeDriver):
         having to do the aggregation.  On those platforms, this method is
         unused.
 
-        Note that this function takes an instance ID, not a
-        compute.service.Instance, so that it can be called by compute.monitor.
+        Note that this function takes an instance ID.
         """
         return [0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L]
 
@@ -432,6 +463,22 @@ class FakeConnection(driver.ComputeDriver):
         """
         return True
 
+    def refresh_provider_fw_rules(self):
+        """This triggers a firewall update based on database changes.
+
+        When this is called, rules have either been added or removed from the
+        datastore.  You can retrieve rules with
+        :method:`nova.db.api.provider_fw_rule_get_all`.
+
+        Provider rules take precedence over security group rules.  If an IP
+        would be allowed by a security group ingress rule, but blocked by
+        a provider rule, then packets from the IP are dropped.  This includes
+        intra-project traffic in the case of the allow_project_net_traffic
+        flag for the libvirt-derived classes.
+
+        """
+        pass
+
     def update_available_resource(self, ctxt, host):
         """This method is supported only by libvirt."""
         return
@@ -449,10 +496,22 @@ class FakeConnection(driver.ComputeDriver):
         """This method is supported only by libvirt."""
         return
 
-    def unfilter_instance(self, instance_ref):
+    def unfilter_instance(self, instance_ref, network_info=None):
         """This method is supported only by libvirt."""
         raise NotImplementedError('This method is supported only by libvirt.')
 
     def test_remove_vm(self, instance_name):
         """ Removes the named VM, as if it crashed. For testing"""
         self.instances.pop(instance_name)
+
+    def update_host_status(self):
+        """Return fake Host Status of ram, disk, network."""
+        return self.host_status
+
+    def get_host_stats(self, refresh=False):
+        """Return fake Host Status of ram, disk, network."""
+        return self.host_status
+
+    def set_host_enabled(self, host, enabled):
+        """Sets the specified host's ability to accept new instances."""
+        pass

@@ -110,7 +110,7 @@ class FlagValues(gflags.FlagValues):
         return name in self.__dict__['__dirty']
 
     def ClearDirty(self):
-        self.__dict__['__is_dirty'] = []
+        self.__dict__['__dirty'] = []
 
     def WasAlreadyParsed(self):
         return self.__dict__['__was_already_parsed']
@@ -119,11 +119,12 @@ class FlagValues(gflags.FlagValues):
         if '__stored_argv' not in self.__dict__:
             return
         new_flags = FlagValues(self)
-        for k in self.__dict__['__dirty']:
+        for k in self.FlagDict().iterkeys():
             new_flags[k] = gflags.FlagValues.__getitem__(self, k)
 
+        new_flags.Reset()
         new_flags(self.__dict__['__stored_argv'])
-        for k in self.__dict__['__dirty']:
+        for k in new_flags.FlagDict().iterkeys():
             setattr(self, k, getattr(new_flags, k))
         self.ClearDirty()
 
@@ -269,8 +270,10 @@ DEFINE_list('region_list',
 DEFINE_string('connection_type', 'libvirt', 'libvirt, xenapi or fake')
 DEFINE_string('aws_access_key_id', 'admin', 'AWS Access ID')
 DEFINE_string('aws_secret_access_key', 'admin', 'AWS Access Key')
-DEFINE_integer('glance_port', 9292, 'glance port')
-DEFINE_string('glance_host', '$my_ip', 'glance host')
+# NOTE(sirp): my_ip interpolation doesn't work within nested structures
+DEFINE_list('glance_api_servers',
+            ['%s:9292' % _get_my_ip()],
+            'list of glance api servers available to nova (host:port)')
 DEFINE_integer('s3_port', 3333, 's3 port')
 DEFINE_string('s3_host', '$my_ip', 's3 host (for infrastructure)')
 DEFINE_string('s3_dmz', '$my_ip', 's3 dmz ip (for instances)')
@@ -295,12 +298,15 @@ DEFINE_bool('fake_network', False,
             'should we use fake network devices and addresses')
 DEFINE_string('rabbit_host', 'localhost', 'rabbit host')
 DEFINE_integer('rabbit_port', 5672, 'rabbit port')
+DEFINE_bool('rabbit_use_ssl', False, 'connect over SSL')
 DEFINE_string('rabbit_userid', 'guest', 'rabbit userid')
 DEFINE_string('rabbit_password', 'guest', 'rabbit password')
 DEFINE_string('rabbit_virtual_host', '/', 'rabbit virtual host')
 DEFINE_integer('rabbit_retry_interval', 10, 'rabbit connection retry interval')
 DEFINE_integer('rabbit_max_retries', 12, 'rabbit connection attempts')
 DEFINE_string('control_exchange', 'nova', 'the main exchange to connect to')
+DEFINE_list('enabled_apis', ['ec2', 'osapi'],
+            'list of APIs to enable by default')
 DEFINE_string('ec2_host', '$my_ip', 'ip of api server')
 DEFINE_string('ec2_dmz_host', '$my_ip', 'internal ip of api server')
 DEFINE_integer('ec2_port', 8773, 'cloud controller port')
@@ -337,7 +343,7 @@ DEFINE_string('lock_path', os.path.join(os.path.dirname(__file__), '../'),
               'Directory for lock files')
 DEFINE_string('logdir', None, 'output to a per-service log file in named '
                               'directory')
-
+DEFINE_integer('logfile_mode', 0644, 'Default file mode of the logs.')
 DEFINE_string('sqlite_db', 'nova.sqlite', 'file name for sqlite')
 DEFINE_string('sql_connection',
               'sqlite:///$state_path/$sqlite_db',
@@ -360,7 +366,7 @@ DEFINE_string('scheduler_manager', 'nova.scheduler.manager.SchedulerManager',
               'Manager for scheduler')
 
 # The service to use for image search and retrieval
-DEFINE_string('image_service', 'nova.image.local.LocalImageService',
+DEFINE_string('image_service', 'nova.image.glance.GlanceImageService',
               'The service to use for retrieving and searching for images.')
 
 DEFINE_string('host', socket.gethostname(),
@@ -379,3 +385,10 @@ DEFINE_string('zone_name', 'nova', 'name of this zone')
 DEFINE_list('zone_capabilities',
                 ['hypervisor=xenserver;kvm', 'os=linux;windows'],
                  'Key/Multi-value list representng capabilities of this zone')
+DEFINE_string('build_plan_encryption_key', None,
+        '128bit (hex) encryption key for scheduler build plans.')
+
+DEFINE_bool('start_guests_on_host_boot', False,
+            'Whether to restart guests when the host reboots')
+DEFINE_bool('resume_guests_state_on_host_boot', False,
+            'Whether to start guests, that was running before the host reboot')

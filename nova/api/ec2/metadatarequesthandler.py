@@ -23,6 +23,7 @@ import webob.exc
 
 from nova import log as logging
 from nova import flags
+from nova import utils
 from nova import wsgi
 from nova.api.ec2 import cloud
 
@@ -33,6 +34,9 @@ FLAGS = flags.FLAGS
 
 class MetadataRequestHandler(wsgi.Application):
     """Serve metadata from the EC2 API."""
+
+    def __init__(self):
+        self.cc = cloud.CloudController()
 
     def print_data(self, data):
         if isinstance(data, dict):
@@ -67,11 +71,18 @@ class MetadataRequestHandler(wsgi.Application):
 
     @webob.dec.wsgify(RequestClass=wsgi.Request)
     def __call__(self, req):
-        cc = cloud.CloudController()
         remote_address = req.remote_addr
         if FLAGS.use_forwarded_for:
             remote_address = req.headers.get('X-Forwarded-For', remote_address)
-        meta_data = cc.get_metadata(remote_address)
+        try:
+            meta_data = self.cc.get_metadata(remote_address)
+        except Exception:
+            LOG.exception(_('Failed to get metadata for ip: %s'),
+                          remote_address)
+            msg = _('An unknown error has occurred. '
+                    'Please try your request again.')
+            exc = webob.exc.HTTPInternalServerError(explanation=unicode(msg))
+            return exc
         if meta_data is None:
             LOG.error(_('Failed to get metadata for ip: %s'), remote_address)
             raise webob.exc.HTTPNotFound()

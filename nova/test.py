@@ -23,7 +23,6 @@ inline callbacks.
 
 """
 
-import datetime
 import functools
 import os
 import shutil
@@ -31,17 +30,19 @@ import uuid
 import unittest
 
 import mox
+import nose.plugins.skip
+import nova.image.fake
 import shutil
 import stubout
 from eventlet import greenthread
 
-from nova import context
-from nova import db
 from nova import fakerabbit
 from nova import flags
+from nova import log
 from nova import rpc
+from nova import utils
 from nova import service
-from nova import wsgi
+from nova.virt import fake
 
 
 FLAGS = flags.FLAGS
@@ -49,6 +50,22 @@ flags.DEFINE_string('sqlite_clean_db', 'clean.sqlite',
                     'File name of clean sqlite db')
 flags.DEFINE_bool('fake_tests', True,
                   'should we use everything for testing')
+
+LOG = log.getLogger('nova.tests')
+
+
+class skip_test(object):
+    """Decorator that skips a test."""
+    def __init__(self, msg):
+        self.message = msg
+
+    def __call__(self, func):
+        def _skipper(*args, **kw):
+            """Wrapped skipper function."""
+            raise nose.SkipTest(self.message)
+        _skipper.__name__ = func.__name__
+        _skipper.__doc__ = func.__doc__
+        return _skipper
 
 
 def skip_if_fake(func):
@@ -71,7 +88,7 @@ class TestCase(unittest.TestCase):
         # NOTE(vish): We need a better method for creating fixtures for tests
         #             now that we have some required db setup for the system
         #             to work properly.
-        self.start = datetime.datetime.utcnow()
+        self.start = utils.utcnow()
         shutil.copyfile(os.path.join(FLAGS.state_path, FLAGS.sqlite_clean_db),
                         os.path.join(FLAGS.state_path, FLAGS.sqlite_db))
 
@@ -82,8 +99,6 @@ class TestCase(unittest.TestCase):
         self.flag_overrides = {}
         self.injected = []
         self._services = []
-        self._monkey_patch_attach()
-        self._monkey_patch_wsgi()
         self._original_flags = FLAGS.FlagValuesDict()
 
     def tearDown(self):
@@ -99,12 +114,15 @@ class TestCase(unittest.TestCase):
             if FLAGS.fake_rabbit:
                 fakerabbit.reset_all()
 
+            if FLAGS.connection_type == 'fake':
+                if hasattr(fake.FakeConnection, '_instance'):
+                    del fake.FakeConnection._instance
+
+            if FLAGS.image_service == 'nova.image.fake.FakeImageService':
+                nova.image.fake.FakeImageService_reset()
+
             # Reset any overriden flags
             self.reset_flags()
-
-            # Reset our monkey-patches
-            rpc.Consumer.attach_to_eventlet = self.original_attach
-            wsgi.Server.start = self.original_start
 
             # Stop any timers
             for x in self.injected:
@@ -123,11 +141,9 @@ class TestCase(unittest.TestCase):
     def flags(self, **kw):
         """Override flag variables for a test."""
         for k, v in kw.iteritems():
-            if k in self.flag_overrides:
-                self.reset_flags()
-                raise Exception(
-                        'trying to override already overriden flag: %s' % k)
-            self.flag_overrides[k] = getattr(FLAGS, k)
+            # Store original flag value if it's not been overriden yet
+            if k not in self.flag_overrides:
+                self.flag_overrides[k] = getattr(FLAGS, k)
             setattr(FLAGS, k, v)
 
     def reset_flags(self):
@@ -149,39 +165,8 @@ class TestCase(unittest.TestCase):
         self._services.append(svc)
         return svc
 
-    def _monkey_patch_attach(self):
-        self.original_attach = rpc.Consumer.attach_to_eventlet
-
-        def _wrapped(inner_self):
-            rv = self.original_attach(inner_self)
-            self.injected.append(rv)
-            return rv
-
-        _wrapped.func_name = self.original_attach.func_name
-        rpc.Consumer.attach_to_eventlet = _wrapped
-
-    def _monkey_patch_wsgi(self):
-        """Allow us to kill servers spawned by wsgi.Server."""
-        self.original_start = wsgi.Server.start
-
-        @functools.wraps(self.original_start)
-        def _wrapped_start(inner_self, *args, **kwargs):
-            original_spawn_n = inner_self.pool.spawn_n
-
-            @functools.wraps(original_spawn_n)
-            def _wrapped_spawn_n(*args, **kwargs):
-                rv = greenthread.spawn(*args, **kwargs)
-                self._services.append(rv)
-
-            inner_self.pool.spawn_n = _wrapped_spawn_n
-            self.original_start(inner_self, *args, **kwargs)
-            inner_self.pool.spawn_n = original_spawn_n
-
-        _wrapped_start.func_name = self.original_start.func_name
-        wsgi.Server.start = _wrapped_start
-
     # Useful assertions
-    def assertDictMatch(self, d1, d2):
+    def assertDictMatch(self, d1, d2, approx_equal=False, tolerance=0.001):
         """Assert two dicts are equivalent.
 
         This is a 'deep' match in the sense that it handles nested
@@ -212,15 +197,26 @@ class TestCase(unittest.TestCase):
         for key in d1keys:
             d1value = d1[key]
             d2value = d2[key]
+            try:
+                error = abs(float(d1value) - float(d2value))
+                within_tolerance = error <= tolerance
+            except (ValueError, TypeError):
+                # If both values aren't convertable to float, just ignore
+                # ValueError if arg is a str, TypeError if it's something else
+                # (like None)
+                within_tolerance = False
+
             if hasattr(d1value, 'keys') and hasattr(d2value, 'keys'):
                 self.assertDictMatch(d1value, d2value)
             elif 'DONTCARE' in (d1value, d2value):
+                continue
+            elif approx_equal and within_tolerance:
                 continue
             elif d1value != d2value:
                 raise_assertion("d1['%(key)s']=%(d1value)s != "
                                 "d2['%(key)s']=%(d2value)s" % locals())
 
-    def assertDictListMatch(self, L1, L2):
+    def assertDictListMatch(self, L1, L2, approx_equal=False, tolerance=0.001):
         """Assert a list of dicts are equivalent."""
         def raise_assertion(msg):
             L1str = str(L1)
@@ -236,4 +232,17 @@ class TestCase(unittest.TestCase):
                             'len(L2)=%(L2count)d' % locals())
 
         for d1, d2 in zip(L1, L2):
-            self.assertDictMatch(d1, d2)
+            self.assertDictMatch(d1, d2, approx_equal=approx_equal,
+                                 tolerance=tolerance)
+
+    def assertSubDictMatch(self, sub_dict, super_dict):
+        """Assert a sub_dict is subset of super_dict."""
+        self.assertTrue(set(sub_dict.keys()).issubset(set(super_dict.keys())))
+        for k, sub_value in sub_dict.items():
+            super_value = super_dict[k]
+            if isinstance(sub_value, dict):
+                self.assertSubDictMatch(sub_value, super_value)
+            elif 'DONTCARE' in (sub_value, super_value):
+                continue
+            else:
+                self.assertEqual(sub_value, super_value)

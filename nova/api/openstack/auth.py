@@ -13,9 +13,8 @@
 #    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
-#    under the License.import datetime
+#    under the License.
 
-import datetime
 import hashlib
 import time
 
@@ -49,28 +48,35 @@ class AuthMiddleware(wsgi.Middleware):
     def __call__(self, req):
         if not self.has_authentication(req):
             return self.authenticate(req)
-        user = self.get_user_by_authentication(req)
-        accounts = self.auth.get_projects(user=user)
-        if not user:
+        user_id = self.get_user_by_authentication(req)
+        if not user_id:
             token = req.headers["X-Auth-Token"]
-            msg = _("%(user)s could not be found with token '%(token)s'")
+            msg = _("%(user_id)s could not be found with token '%(token)s'")
             LOG.warn(msg % locals())
             return faults.Fault(webob.exc.HTTPUnauthorized())
 
-        if accounts:
-            #we are punting on this til auth is settled,
-            #and possibly til api v1.1 (mdragon)
-            account = accounts[0]
-        else:
-            return faults.Fault(webob.exc.HTTPUnauthorized())
+        try:
+            project_id = req.headers["X-Auth-Project-Id"]
+        except KeyError:
+            # FIXME(usrleon): It needed only for compatibility
+            # while osapi clients don't use this header
+            projects = self.auth.get_projects(user_id)
+            if projects:
+                project_id = projects[0].id
+            else:
+                return faults.Fault(webob.exc.HTTPUnauthorized())
 
-        if not self.auth.is_admin(user) and \
-           not self.auth.is_project_member(user, account):
-            msg = _("%(user)s must be an admin or a member of %(account)s")
+        is_admin = self.auth.is_admin(user_id)
+        req.environ['nova.context'] = context.RequestContext(user_id,
+                                                             project_id,
+                                                             is_admin)
+        if not is_admin and not self.auth.is_project_member(user_id,
+                                                            project_id):
+            msg = _("%(user_id)s must be an admin or a "
+                    "member of %(project_id)s")
             LOG.warn(msg % locals())
             return faults.Fault(webob.exc.HTTPUnauthorized())
 
-        req.environ['nova.context'] = context.RequestContext(user, account)
         return self.application
 
     def has_authentication(self, req):
@@ -127,11 +133,11 @@ class AuthMiddleware(wsgi.Middleware):
         except exception.NotFound:
             return None
         if token:
-            delta = datetime.datetime.utcnow() - token['created_at']
+            delta = utils.utcnow() - token['created_at']
             if delta.days >= 2:
                 self.db.auth_token_destroy(ctxt, token['token_hash'])
             else:
-                return self.auth.get_user(token['user_id'])
+                return token['user_id']
         return None
 
     def _authorize_user(self, username, key, req):

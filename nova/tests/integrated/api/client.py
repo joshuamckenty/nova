@@ -71,8 +71,8 @@ class TestOpenStackClient(object):
         self.auth_uri = auth_uri
 
     def request(self, url, method='GET', body=None, headers=None):
-        if headers is None:
-            headers = {}
+        _headers = {'Content-Type': 'application/json'}
+        _headers.update(headers or {})
 
         parsed_url = urlparse.urlparse(url)
         port = parsed_url.port
@@ -94,9 +94,8 @@ class TestOpenStackClient(object):
         LOG.info(_("Doing %(method)s on %(relative_url)s") % locals())
         if body:
             LOG.info(_("Body: %s") % body)
-            headers.setdefault('Content-Type', 'application/json')
 
-        conn.request(method, relative_url, body, headers)
+        conn.request(method, relative_url, body, _headers)
         response = conn.getresponse()
         return response
 
@@ -152,7 +151,10 @@ class TestOpenStackClient(object):
     def _decode_json(self, response):
         body = response.read()
         LOG.debug(_("Decoding JSON: %s") % (body))
-        return json.loads(body)
+        if body:
+            return json.loads(body)
+        else:
+            return ""
 
     def api_get(self, relative_uri, **kwargs):
         kwargs.setdefault('check_response_status', [200])
@@ -166,13 +168,24 @@ class TestOpenStackClient(object):
             headers['Content-Type'] = 'application/json'
             kwargs['body'] = json.dumps(body)
 
-        kwargs.setdefault('check_response_status', [200])
+        kwargs.setdefault('check_response_status', [200, 202])
+        response = self.api_request(relative_uri, **kwargs)
+        return self._decode_json(response)
+
+    def api_put(self, relative_uri, body, **kwargs):
+        kwargs['method'] = 'PUT'
+        if body:
+            headers = kwargs.setdefault('headers', {})
+            headers['Content-Type'] = 'application/json'
+            kwargs['body'] = json.dumps(body)
+
+        kwargs.setdefault('check_response_status', [200, 202, 204])
         response = self.api_request(relative_uri, **kwargs)
         return self._decode_json(response)
 
     def api_delete(self, relative_uri, **kwargs):
         kwargs['method'] = 'DELETE'
-        kwargs.setdefault('check_response_status', [200, 202])
+        kwargs.setdefault('check_response_status', [200, 202, 204])
         return self.api_request(relative_uri, **kwargs)
 
     def get_server(self, server_id):
@@ -184,6 +197,12 @@ class TestOpenStackClient(object):
 
     def post_server(self, server):
         return self.api_post('/servers', server)['server']
+
+    def put_server(self, server_id, server):
+        return self.api_put('/servers/%s' % server_id, server)
+
+    def post_server_action(self, server_id, data):
+        return self.api_post('/servers/%s/action' % server_id, data)
 
     def delete_server(self, server_id):
         return self.api_delete('/servers/%s' % server_id)
@@ -215,30 +234,30 @@ class TestOpenStackClient(object):
         return self.api_delete('/flavors/%s' % flavor_id)
 
     def get_volume(self, volume_id):
-        return self.api_get('/volumes/%s' % volume_id)['volume']
+        return self.api_get('/os-volumes/%s' % volume_id)['volume']
 
     def get_volumes(self, detail=True):
-        rel_url = '/volumes/detail' if detail else '/volumes'
+        rel_url = '/os-volumes/detail' if detail else '/os-volumes'
         return self.api_get(rel_url)['volumes']
 
     def post_volume(self, volume):
-        return self.api_post('/volumes', volume)['volume']
+        return self.api_post('/os-volumes', volume)['volume']
 
     def delete_volume(self, volume_id):
-        return self.api_delete('/volumes/%s' % volume_id)
+        return self.api_delete('/os-volumes/%s' % volume_id)
 
     def get_server_volume(self, server_id, attachment_id):
-        return self.api_get('/servers/%s/volume_attachments/%s' %
+        return self.api_get('/servers/%s/os-volume_attachments/%s' %
                             (server_id, attachment_id))['volumeAttachment']
 
     def get_server_volumes(self, server_id):
-        return self.api_get('/servers/%s/volume_attachments' %
+        return self.api_get('/servers/%s/os-volume_attachments' %
                             (server_id))['volumeAttachments']
 
     def post_server_volume(self, server_id, volume_attachment):
-        return self.api_post('/servers/%s/volume_attachments' %
+        return self.api_post('/servers/%s/os-volume_attachments' %
                         (server_id), volume_attachment)['volumeAttachment']
 
     def delete_server_volume(self, server_id, attachment_id):
-        return self.api_delete('/servers/%s/volume_attachments/%s' %
+        return self.api_delete('/servers/%s/os-volume_attachments/%s' %
                             (server_id, attachment_id))

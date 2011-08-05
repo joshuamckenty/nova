@@ -42,6 +42,7 @@ from nova import exception
 from nova import flags
 from nova import utils
 from nova import wsgi
+import nova.api.openstack.wsgi
 
 
 # Global storage for registering modules.
@@ -106,7 +107,8 @@ class DelegatedAuthMiddleware(wsgi.Middleware):
     def process_request(self, request):
         os_user = request.headers['X-OpenStack-User']
         os_project = request.headers['X-OpenStack-Project']
-        context_ref = context.RequestContext(user=os_user, project=os_project)
+        context_ref = context.RequestContext(user_id=os_user,
+                                             project_id=os_project)
         request.environ['openstack.context'] = context_ref
 
 
@@ -251,7 +253,7 @@ class Reflection(object):
         return self._methods[method]
 
 
-class ServiceWrapper(wsgi.Controller):
+class ServiceWrapper(object):
     """Wrapper to dynamically povide a WSGI controller for arbitrary objects.
 
     With lightweight introspection allows public methods on the object to
@@ -265,7 +267,7 @@ class ServiceWrapper(wsgi.Controller):
     def __init__(self, service_handle):
         self.service_handle = service_handle
 
-    @webob.dec.wsgify(RequestClass=wsgi.Request)
+    @webob.dec.wsgify(RequestClass=nova.api.openstack.wsgi.Request)
     def __call__(self, req):
         arg_dict = req.environ['wsgiorg.routing_args'][1]
         action = arg_dict['action']
@@ -289,8 +291,11 @@ class ServiceWrapper(wsgi.Controller):
 
         try:
             content_type = req.best_match_content_type()
-            default_xmlns = self.get_default_xmlns(req)
-            return self._serialize(result, content_type, default_xmlns)
+            serializer = {
+              'application/xml': nova.api.openstack.wsgi.XMLDictSerializer(),
+              'application/json': nova.api.openstack.wsgi.JSONDictSerializer(),
+            }[content_type]
+            return serializer.serialize(result)
         except:
             raise exception.Error("returned non-serializable type: %s"
                                   % result)
@@ -320,7 +325,7 @@ class Limited(object):
 
     def __init__(self, proxy):
         self._proxy = proxy
-        if not self.__doc__:
+        if not self.__doc__:  # pylint: disable=E0203
             self.__doc__ = proxy.__doc__
         if not self._allowed:
             self._allowed = []
