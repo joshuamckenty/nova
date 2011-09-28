@@ -701,9 +701,12 @@ class LibvirtConnTestCase(test.TestCase):
 
         fake_timer = FakeTime()
 
+        # _fake_network_info must be called before create_fake_libvirt_mock(),
+        # as _fake_network_info calls utils.import_class() and
+        # create_fake_libvirt_mock() mocks utils.import_class().
+        network_info = _fake_network_info(self.stubs, 1)
         self.create_fake_libvirt_mock()
         instance_ref = db.instance_create(self.context, self.test_instance)
-        network_info = _create_network_info()
 
         # Start test
         self.mox.ReplayAll()
@@ -756,10 +759,7 @@ class LibvirtConnTestCase(test.TestCase):
                 return vdmock
 
         self.create_fake_libvirt_mock(lookupByName=fake_lookup)
-#        self.mox.StubOutWithMock(self.compute, "recover_live_migration")
         self.mox.StubOutWithMock(self.compute, "rollback_live_migration")
-#        self.compute.recover_live_migration(self.context, instance_ref,
-#                                             dest='dest')
         self.compute.rollback_live_migration(self.context, instance_ref,
                                             'dest', False)
 
@@ -794,7 +794,8 @@ class LibvirtConnTestCase(test.TestCase):
 
         # Test data
         instance_ref = db.instance_create(self.context, self.test_instance)
-        dummyjson = '[{"path": "%s/disk", "local_gb": "10G", "type": "raw"}]'
+        dummyjson = ('[{"path": "%s/disk", "local_gb": "10G",'
+                     ' "type": "raw", "backing_file": ""}]')
 
         # Preparing mocks
         # qemu-img should be mockd since test environment might not have
@@ -835,7 +836,10 @@ class LibvirtConnTestCase(test.TestCase):
                     "</devices></domain>")
 
         ret = ("image: /test/disk\nfile format: raw\n"
-               "virtual size: 20G (21474836480 bytes)\ndisk size: 3.1G\n")
+               "virtual size: 20G (21474836480 bytes)\ndisk size: 3.1G\n"
+               "disk size: 102M\n"
+               "cluster_size: 2097152\n"
+               "backing file: /test/dummy (actual path: /backing/file)\n")
 
         # Preparing mocks
         vdmock = self.mox.CreateMock(libvirt.virDomain)
@@ -865,7 +869,9 @@ class LibvirtConnTestCase(test.TestCase):
                         info[0]['path'] == '/test/disk' and
                         info[1]['path'] == '/test/disk.local' and
                         info[0]['local_gb'] == '10G' and
-                        info[1]['local_gb'] == '20G')
+                        info[1]['local_gb'] == '20G' and
+                        info[0]['backing_file'] == "" and
+                        info[1]['backing_file'] == "file")
 
         db.instance_destroy(self.context, instance_ref['id'])
 
@@ -878,6 +884,10 @@ class LibvirtConnTestCase(test.TestCase):
         def fake_none(self, instance):
             return
 
+        # _fake_network_info must be called before create_fake_libvirt_mock(),
+        # as _fake_network_info calls utils.import_class() and
+        # create_fake_libvirt_mock() mocks utils.import_class().
+        network_info = _fake_network_info(self.stubs, 1)
         self.create_fake_libvirt_mock()
         instance = db.instance_create(self.context, self.test_instance)
 
@@ -886,8 +896,6 @@ class LibvirtConnTestCase(test.TestCase):
         conn = connection.LibvirtConnection(False)
         conn.firewall_driver.setattr('setup_basic_filtering', fake_none)
         conn.firewall_driver.setattr('prepare_instance_filter', fake_none)
-
-        network_info = _create_network_info()
 
         try:
             conn.spawn(self.context, instance, network_info)
