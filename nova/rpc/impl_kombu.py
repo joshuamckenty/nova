@@ -618,6 +618,8 @@ class ProxyCallback(object):
         # NOTE(vish): magic is fun!
         try:
             rval = node_func(context=ctxt, **node_args)
+            if rval is None:
+                LOG.warn("NONE CALL from: %s - %s -", method, args)
             # Check if the result was a generator
             if isinstance(rval, types.GeneratorType):
                 for x in rval:
